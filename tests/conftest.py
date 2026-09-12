@@ -1,32 +1,31 @@
+"""Shared pytest fixtures."""
 
-import pathlib
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 import pytest
 
-import geom2d
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-# Location of tests
-TEST_DIR = pathlib.Path(__file__).parent
-
-# Location of test input SVG files
-FILES_DIR = TEST_DIR / 'files'
-
-# Location of test output
-TMP_DIR = TEST_DIR / 'tmp'
-
-LOG_FILE = TMP_DIR / 'tcnc.log'
-NGC_FILE = TMP_DIR / 'output.ngc'
-SVG_FILE = TMP_DIR / 'output.svg'
-
-BASE_ARGS = [
-    '--log-create=true',
-    f'--log-filename=${LOG_FILE}',
-    '--log-level=DEBUG',
-    f'--output-path=${NGC_FILE}',
-]
+FIXTURES_DIR = Path(__file__).parent / "files"
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _initialize():
-    geom2d.set_epsilon(1e-7)
+@pytest.fixture(scope="session")
+def fixtures_dir() -> Path:
+    """Directory holding the SVG fixture files."""
+    return FIXTURES_DIR
 
 
+@pytest.fixture
+def fixture(fixtures_dir: Path) -> Callable[[str], Path]:
+    """Return a callable that resolves a fixture file name to its path."""
+
+    def _resolve(name: str) -> Path:
+        path = fixtures_dir / name
+        if not path.is_file():
+            msg = f"missing fixture {name!r} in {fixtures_dir}"
+            raise FileNotFoundError(msg)
+        return path
+
+    return _resolve

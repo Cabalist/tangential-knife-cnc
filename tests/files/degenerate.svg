@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="4in" height="4in" viewBox="0 0 4 4">
+  <path id="dot" d="M 1,1 Z" fill="none" stroke="#000" stroke-width="0.02"/>
+  <path id="dup" d="M 2,2 L 2,2" fill="none" stroke="#000" stroke-width="0.02"/>
+  <path id="real" d="M 1,3 L 3,3" fill="none" stroke="#000" stroke-width="0.02"/>
+</svg>

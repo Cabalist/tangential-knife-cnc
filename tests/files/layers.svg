@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="4in" height="4in" viewBox="0 0 4 4">
+  <g inkscape:groupmode="layer" inkscape:label="Cuts" id="layer1">
+    <path id="visible-line" d="M 0.5,0.5 L 3.5,0.5" fill="none" stroke="#000" stroke-width="0.02"/>
+    <path id="invisible-line" d="M 0.5,1 L 3.5,1" fill="none" stroke="#000" stroke-width="0.02" visibility="hidden"/>
+    <path id="undisplayed-line" d="M 0.5,1.5 L 3.5,1.5" fill="none" stroke="#000" stroke-width="0.02" style="display:none"/>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="Guides" id="layer2" style="display:none">
+    <path id="guide-line" d="M 0.5,2 L 3.5,2" fill="none" stroke="#00f" stroke-width="0.02"/>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="Marks" id="layer3">
+    <path id="mark-line" d="M 0.5,3 L 3.5,3" fill="none" stroke="#f00" stroke-width="0.02"/>
+  </g>
+</svg>

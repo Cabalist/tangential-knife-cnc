@@ -1,205 +1,157 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "utl-tcnc"
-version = "0.2.1"
-authors = [{name = "Claude Zervas", email = "claude@utlco.com"}]
-description = "Simple 3.5 axis gcode generator (CAM)"
-readme = "README.rst"
-requires-python = ">=3.9"
-license = {text = "GNU Lesser GPL 3"}
+version = "1.0.0"
+description = "SVG to LinuxCNC G-code for an oscillating tangential knife"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "LGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Ryan Jarvis", email = "ryan@technoloft.com" }]
+maintainers = [{ name = "Ryan Jarvis", email = "ryan@technoloft.com" }]
+keywords = ["svg", "gcode", "cnc", "tangential knife", "linuxcnc"]
 classifiers = [
-    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Typing :: Typed",
 ]
+# Upstream: utlco/utl-tcnc by Claude Zervas (LGPL-3.0). Rewritten 2026-09.
 dependencies = [
-    #"utl-inkext@https://github.com/utlco/utl-inkext/archive/refs/heads/main.zip",
-    #"utl-geom2d@https://github.com/utlco/utl-geom2d/archive/refs/heads/main.zip",
-    "utl-inkext",
-    "utl-geom2d",
+    "utl-geom2d>=1.0.0",
+    "svgelements>=1.9",
 ]
 
-[project.optional-dependencies]
-test = ["pytest"]
+[dependency-groups]
 dev = [
+    "prek",
+    "pyrefly",
     "pytest",
-    "black",
+    "pytest-randomly",
+    "pytest-xdist",
     "ruff",
-    "pylint",
-    "mypy",
-    "sphinx",
-    #"utl-sphinx-theme@https://github.com/utlco/utl-sphinx-theme/archive/refs/heads/main.zip",
-    "utl-sphinx-theme",
+    "ty",
 ]
-
-[project.urls]
-Repository = "https://github.com/utlco/utl-tcnc"
-Documentation = "https://utlco.github.io/utl-tcnc"
 
 [project.scripts]
-tcnc="tcnc.tcnc:main"
+tcnc = "tcnc.cli:main"
 
-[tool.pytest.ini_options]
-minversion="6.0"
-addopts = "-ra -q -s"
-testpaths = ["test",]
+[project.urls]
+Repository = "https://github.com/Cabalist/utl-tcnc"
 
-[tool.black]
-line-length = 80
-target-version = ["py39"]
-skip-string-normalization = true
-preview = true
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tcnc*"]
 
-[tool.pylint.MAIN]
-#extension-pkg-allow-list = ["lxml.etree"]
+[tool.setuptools.package-dir]
+"" = "src"
 
-[tool.pylint."MESSAGES CONTROL"]
-ignore = "contrib"
-disable = [
-    "too-many-locals",
-    "too-many-lines",
-    "missing-function-docstring",
-    "consider-using-enumerate",
-    "too-few-public-methods",
-    "too-many-public-methods",
-    "too-many-arguments",
-    "too-many-instance-attributes",
-    "too-many-branches",
-    "too-many-boolean-expressions",
-    "fixme"
-]
+[tool.setuptools.package-data]
+"tcnc" = ["py.typed"]
 
-[tool.pylint.VARIABLES]
-variable-rgx = "^_?[a-z][a-z0-9_]*$"
-attr-rgx = "^_{0,2}[a-z][a-z0-9_]*$"
-argument-rgx = "^_?[a-z][a-z0-9_]*$"
-method-rgx = "(?x)^(?:(?P<exempt>_[a-z0-9_]+__|(test|assert)_*[A-Z0-9][a-zA-Z0-9_]*|next)|(?P<snake_case>_{0,2}[a-z][a-z0-9_]*))$"
-
+[tool.uv.sources]
+# Local sibling checkout while geom2d 1.0.0 is untagged and unpublished.
+# Switch to { git = "https://github.com/Cabalist/utl-geom2d.git", tag = "v1.0.0" }
+# once the tag exists; CI cannot resolve the relative path.
+utl-geom2d = { path = "../utl-geom2d", editable = true }
 
 [tool.ruff]
-target-version = "py39"
-preview = true
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
 select = [
-    "A",
-    "B",
-    "D",
-    "E",
-    "F",
-    "G",
-    "I",
-    "Q",
-    "W",
-    "N",
-    # "S",
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
     "ANN",
-    "AIR",
-    "ARG",
-    "BLE",
-    # "FBT",
-    "C4",
-    # "C90",
-    "COM",
-    "DTZ",
-    # "EM",
-    # "ERA",
-    "FA",
-    # "FIX",
-    "FLY",
-    "FURB",
-    "ICN",
-    "INP",
-    "INT",
-    "ISC",
-    # "ERA",
-    "PD",
+    "RUF",
+    "PTH",
+    "PIE",
     "PERF",
     "PGH",
-    "PIE",
-    "PL",
-    "PT",
-    "PTH",
-    "PYI",
-    "NPY",
-    "RET",
-    "RSE",
-    "RUF",
-    "SIM",
-    "SLF",
-    "SLOT",
-    "T20",
-    # "TD",
-    "TCH",
+    "G",
     "TID",
+    "PT",
+    "RET",
+    "ARG",
     "TRY",
-    "UP",
-    "YTT",
+    "PL",
+    "DTZ",
+    "T20",
+    "ISC",
+    "TC",
 ]
 ignore = [
-    "ANN101", # self annotated... good grief
-    "D104", # Missing docstring in `__init__.py`
-    "Q000", # Double quotes preferred
-    #"UP006",
-    #"UP007", # use X | Y type annot
-    #"A003", # Fix this (reversed builtin)
-    "COM812", # missing trailing comma, this is stupid
-    "RUF005", # replace concat
-    #"RSE102",
-    "SIM108", # use ternary op
-    "PLR0913", # Too many arguments in function definition
-    "PLR0917", # Too many positional args
-    "PTH123", # Use Path.open
-    "TRY003", # long msg outside exc cls
-    "TRY400", # Use `logging.exception` instead of `logging.error`
+    "E501",    # line too long (handled by formatter)
+    "PERF401",
+    "PERF403",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR0917", # established APIs and callback/fixture signatures accept positional arguments
+    "PLR2004",
+    "TRY003",
 ]
-extend-exclude = [
-    "venv",
-    "contrib",
-    "tmp",
-    "saved",
-    "unused",
-    "docs",
-]
+per-file-ignores = { "tests/**" = ["ANN", "PLR2004", "ARG001"], "stubs/**" = ["ANN401", "I001"] }
 
-[tool.ruff.per-file-ignores]
-"__init__.py" = ["F401"]
+[tool.ruff.lint.isort]
+known-first-party = ["tcnc"]
 
-[tool.ruff.pydocstyle]
-convention = "google"
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-n", "auto", "--dist=loadscope", "-ra"]
 
-[tool.mypy]
-mypy_path = "./src"
-python_version = "3.9"
-warn_return_any = true
-warn_unused_configs = true
-#ignore_missing_imports = true
-check_untyped_defs = true
-exclude = [
-    "contrib",
-    "tmp",
-    "saved",
-    "unused",
-    "build",
-    "docs",
-]
+[tool.ty.src]
+include = ["src", "tests"]
 
-#[[tool.mypy.overrides]]
-#module = ""
-#follow_imports = "skip"
+[tool.ty.environment]
+python-version = "3.14"
+# "." resolves the `tests` package so shared test helpers import as `tests.*`.
+root = ["./src", "."]
+# svgelements ships ISO-8859-1 source the checkers cannot read; stubs/ declares what tcnc uses.
+extra-paths = ["stubs"]
 
-[tool.typos]
+[tool.ty.rules]
+missing-type-argument = "error"
+possibly-missing-attribute = "error"
+possibly-missing-import = "error"
+possibly-unresolved-reference = "error"
+redundant-cast = "error"
+unused-ignore-comment = "error"
+unused-type-ignore-comment = "error"
 
-[tool.typos.files]
-extend-exclude = [
-    "venv",
-    "__pycache__",
-    "saved",
-    "build",
-    "_build",
-    "unused",
-    "test",
-    "tmp",
-    "out"
-]
+[[tool.ty.overrides]]
+include = ["tests/**"]
+rules = { unresolved-attribute = "ignore" }
 
+[tool.pyrefly]
+min-severity = "warn"
+project-includes = ["src", "tests"]
+python-version = "3.14"
+search-path = ["src", "stubs", "."]
+preset = "strict"
 
+[tool.pyrefly.errors]
+redundant-cast = "error"
+# Every hit is a `key=lambda` passed to sorted/min/max over a typed
+# iterable. Pyrefly 1.2 does not solve the lambda's parameter from the
+# sibling iterable argument, so it reports the idiom itself; ty infers and
+# checks the same lambdas. Re-enable once pyrefly solves generic key callables.
+implicit-any-lambda = "ignore"
+
+[[tool.pyrefly.sub-config]]
+matches = "tests/**/*"
+
+[tool.pyrefly.sub-config.errors]
+implicit-any-empty-container = "ignore"
+implicit-any-parameter = "ignore"
+implicit-any-type-argument = "ignore"
+missing-attribute = "ignore"

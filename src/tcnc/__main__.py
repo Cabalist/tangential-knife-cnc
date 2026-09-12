@@ -1,5 +1,5 @@
-"""Main invocation for TCNC Inkscape extension."""
+"""``python -m tcnc``."""
 
-from tcnc import tcnc
+from tcnc.cli import main
 
-tcnc.main()
+raise SystemExit(main())

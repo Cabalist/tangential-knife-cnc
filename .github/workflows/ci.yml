@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+      # NOTE: [tool.uv.sources] points utl-geom2d at a sibling path until
+      # geom2d tags v1.0.0; until then this job cannot resolve dependencies.
+      - run: uv sync --all-groups
+      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests
+      - run: uv run ty check
+      - run: uv run pyrefly check
+      - run: uv run pytest

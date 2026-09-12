@@ -1,2 +1,0 @@
-https://github.com/utlco/utl-sphinx-theme/archive/refs/heads/main.zip
-sphinx>=7.1.2
