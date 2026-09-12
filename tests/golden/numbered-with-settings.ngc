@@ -5,34 +5,48 @@
 ; Cuts: 4
 ; Passes per cut: 1
 ; Settings:
-;   flip_y = True
-;   tolerance = 0.01
-;   biarc_tolerance = 0.01
-;   biarc_max_depth = 8
-;   output_precision = 3
-;   xy_feed = 250.0
-;   z_feed = 250.0
-;   a_feed = 60.0
-;   z_safe = 10.0
-;   z_depth = -1.0
-;   z_step = 0.0
-;   tool_wait = 0.0
-;   blend_mode = default
-;   blend_tolerance = 0.0
-;   corner_angle = 15 deg
-;   overcut = 1.0
-;   blade_offset = 0.0
-;   blade_width = 0.0
-;   a_offset = 0 deg
-;   oscillation_mode = program
-;   spindle_speed = 0
-;   spindle_wait_on = 0.0
-;   sort_method = none
-;   gcode_comments = True
-;   gcode_line_numbers = True
-;   write_settings = True
-;   ids = ()
-;   layers = ()
+;   job: flip_y = True
+;   job: tolerance = 0.01
+;   job: biarc_tolerance = 0.01
+;   job: biarc_max_depth = 8
+;   job: output_precision = 3
+;   job: z_safe = 10.0
+;   job: blend_mode = default
+;   job: blend_tolerance = 0.0
+;   job: gcode_comments = True
+;   job: gcode_line_numbers = True
+;   job: write_settings = True
+;   job: xy_feed = 250.0
+;   job: z_feed = 250.0
+;   job: a_feed = 60.0
+;   job: tool_wait = 0.0
+;   tool knife: kind = knife
+;   tool knife: number = None
+;   tool knife: a_offset = 0 deg
+;   tool knife: corner_angle = 15 deg
+;   tool knife: blade_offset = 0.0
+;   tool knife: blade_width = 0.0
+;   tool knife: oscillation = True
+;   tool knife: spindle_speed = 0
+;   tool knife: spindle_wait_on = 0.0
+;   tool knife: xy_feed = None
+;   tool knife: z_feed = None
+;   tool knife: a_feed = None
+;   tool knife: tool_wait = None
+;   operation cut: tool = knife
+;   operation cut: z_depth = -1.0
+;   operation cut: ids = ()
+;   operation cut: layers = ()
+;   operation cut: z_step = 0.0
+;   operation cut: z_safe = None
+;   operation cut: overcut = 1.0
+;   operation cut: corner_angle = None
+;   operation cut: sort_method = none
+;   operation cut: oscillation_mode = operation
+;   operation cut: xy_feed = None
+;   operation cut: z_feed = None
+;   operation cut: a_feed = None
+;   operation cut: tool_wait = None
 
 N1 G17  ; XY plane
 N2 G21  ; millimetres

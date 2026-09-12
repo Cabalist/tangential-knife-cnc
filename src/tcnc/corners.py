@@ -1,6 +1,6 @@
 """Turn toolpaths into cuts: split at sharp corners, add lead-in and overcut.
 
-A ``Cut`` is one continuous knife-down run. Wherever the blade would have to
+A ``Cut`` is one continuous tool-down run. Wherever the blade would have to
 turn by more than the corner angle while in the material, the toolpath is
 split. That includes compensation connectors: a connector whose recorded
 source ``joint_turn`` exceeds the threshold is removed (every piece of it)
@@ -17,12 +17,11 @@ from typing import TYPE_CHECKING
 from geom2d import Box, Line, P
 
 from tcnc.errors import PlanError
+from tcnc.options import Job, KnifeOptions, OperationSettings, as_job
 from tcnc.toolpath import Hints, Segment, Toolpath, check_traversal, heading_change
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from tcnc.options import KnifeOptions
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,21 +104,16 @@ class Cut:
 
 
 @dataclass(frozen=True, slots=True)
-class CutPlan:
-    """Every cut of a job, in machining order, with the options that produced it."""
+class OperationPlan:
+    """The cuts of one operation, in machining order, with the settings that produced them."""
 
+    settings: OperationSettings
     cuts: tuple[Cut, ...]
-    options: KnifeOptions
 
     @property
     def bounding_box(self) -> Box | None:
-        """Bounding box of all cuts, or ``None`` for an empty plan."""
-        if not self.cuts:
-            return None
-        box = self.cuts[0].bounding_box
-        for cut in self.cuts[1:]:
-            box = box.union(cut.bounding_box)
-        return box
+        """Bounding box of all cuts, or ``None`` for an empty operation."""
+        return _union(self.cuts)
 
     @property
     def cut_length(self) -> float:
@@ -127,12 +121,60 @@ class CutPlan:
         return sum(cut.length for cut in self.cuts)
 
 
-def plan_cuts(toolpaths: Sequence[Toolpath], options: KnifeOptions) -> CutPlan:
-    """Build the cut plan for the given toolpaths in the given order."""
+@dataclass(frozen=True, slots=True)
+class JobPlan:
+    """Every operation of a job, planned, with the job that produced them."""
+
+    job: Job
+    operations: tuple[OperationPlan, ...]
+
+    @property
+    def cuts(self) -> tuple[Cut, ...]:
+        """All cuts of all operations, in program order."""
+        return tuple(cut for operation in self.operations for cut in operation.cuts)
+
+    @property
+    def bounding_box(self) -> Box | None:
+        """Bounding box of all cuts, or ``None`` for an empty plan."""
+        return _union(self.cuts)
+
+    @property
+    def cut_length(self) -> float:
+        """Total knife-down travel."""
+        return sum(operation.cut_length for operation in self.operations)
+
+
+def _union(cuts: Sequence[Cut]) -> Box | None:
+    if not cuts:
+        return None
+    box = cuts[0].bounding_box
+    for cut in cuts[1:]:
+        box = box.union(cut.bounding_box)
+    return box
+
+
+def as_settings(settings: OperationSettings | Job | KnifeOptions) -> OperationSettings:
+    """Resolved settings as given, or the single operation of a job (or of the job ``KnifeOptions`` describes).
+
+    Raises:
+        PlanError: For a job with more than one operation; that needs one call per operation.
+    """
+    if isinstance(settings, OperationSettings):
+        return settings
+    job = as_job(settings)
+    if len(job.operations) != 1:
+        msg = "planning pre-built toolpaths needs the settings of one operation; the job has several"
+        raise PlanError(msg)
+    return job.settings[0]
+
+
+def plan_cuts(toolpaths: Sequence[Toolpath], settings: OperationSettings | Job | KnifeOptions) -> OperationPlan:
+    """Build the cuts for the given toolpaths in the given order under one operation's settings."""
+    resolved = as_settings(settings)
     cuts: list[Cut] = []
     for toolpath in toolpaths:
-        cuts.extend(cuts_for_toolpath(toolpath, corner_angle=options.corner_angle, overcut=options.overcut))
-    return CutPlan(tuple(cuts), options)
+        cuts.extend(cuts_for_toolpath(toolpath, corner_angle=resolved.corner_angle, overcut=resolved.overcut))
+    return OperationPlan(resolved, tuple(cuts))
 
 
 def is_sharp_connector(segment: Segment, corner_angle: float) -> bool:
@@ -164,8 +206,16 @@ def entry_indices(toolpath: Toolpath, corner_angle: float) -> list[int]:
     ]
 
 
-def cuts_for_toolpath(toolpath: Toolpath, *, corner_angle: float, overcut: float) -> list[Cut]:
-    """Split one toolpath at sharp corners and extend the resulting runs."""
+def cuts_for_toolpath(toolpath: Toolpath, *, corner_angle: float | None, overcut: float) -> list[Cut]:
+    """Split one toolpath at sharp corners and extend the resulting runs.
+
+    With ``corner_angle`` ``None`` (a tool that never lifts, the pen) the
+    whole toolpath is one cut: a loop when closed, a run otherwise.
+    """
+    if corner_angle is None:
+        if toolpath.closed:
+            return [_loop_cut(toolpath, overcut)]
+        return [_run_cut(toolpath.segments, toolpath, overcut)]
     if toolpath.closed:
         entries = entry_indices(toolpath, corner_angle)
         if not entries:

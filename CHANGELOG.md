@@ -2,6 +2,43 @@
 
 ## 1.0.1 (unreleased)
 
+Tool changes (API change; `docs/tool-changes.md`):
+
+- A `Job` of `Tool`s and `Operation`s is the settings model: each
+  operation cuts one selection with one tool; settings resolve operation,
+  then tool, then job. `Job.settings` yields resolved `OperationSettings`
+  (pass schedule included); `plan_job(document, job)` returns a `JobPlan`
+  of `OperationPlan`s; `plan_toolpaths` and `plan_cuts` serve pre-built
+  toolpaths. `KnifeOptions` remains the flat single-knife record and
+  builds a one-operation job (`to_job`); `CutPlan` is gone.
+- Tool kinds: the knife (tangential, oscillates, lifts above 15°), the
+  creaser (tangential, never oscillates, its own threshold, 10° by
+  default) and the pen (parks the A axis once at its mounting angle,
+  never lifts, no overcut, no blade offset, one pass).
+- The program writes `T n M6` then `G43` whenever the tool changes, with
+  the head at safe height and the oscillation off; nothing LinuxCNC does
+  itself (change position, waiting, offsets) is repeated. A tool without
+  a number is the mounted one and can only lead. Each operation has its
+  own safe height. `oscillation_mode` gains `operation` (`program` stays
+  as its alias) and defaults per tool kind.
+- `tcnc --job JOB.toml` runs a TOML job file (`load_job_file`,
+  `parse_job`); unknown keys and wrong types are usage errors; the knife
+  options cannot accompany it. The single-knife command line and its
+  programs are unchanged except the `--write-settings` header, which now
+  lists the job, the tool and the operation.
+- The loader keeps each path's groups and clone ids; `SvgDocument.select`
+  filters after loading (`load_svg` lost `ids`/`layers`). Elements that
+  cannot be converted (a degenerate transform) are reported only when a
+  selection includes them.
+- Review fixes: the writer forgets its cached axis values at a tool
+  change (`M6` may move the machine, `G43` changes the coordinates) and
+  positions Z, X, Y and A again; it retracts before the first change and
+  before parking a pen; the job file cannot be an output; abbreviated
+  options are refused so none can slip past the `--job` check; legend
+  text is XML-escaped.
+- The preview colours operations by tool kind, draws no ticks for a pen
+  and adds a legend for multi-operation jobs.
+
 Metric only and a job-scoped tolerance (both API changes):
 
 - Every length is a millimetre and the header sets `G21`; `--gcode-units`,

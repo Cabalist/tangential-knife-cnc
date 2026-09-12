@@ -7,7 +7,17 @@ from typing import TYPE_CHECKING
 import pytest
 from geom2d import P
 
-from tcnc.cli import EXIT_OK, EXIT_PLAN, EXIT_SVG, EXIT_USAGE, build_parser, main, options_from_namespace, run
+from tcnc.cli import (
+    EXIT_OK,
+    EXIT_PLAN,
+    EXIT_SVG,
+    EXIT_USAGE,
+    KNIFE_OPTIONS,
+    build_parser,
+    main,
+    options_from_namespace,
+    run,
+)
 from tcnc.errors import OptionError
 from tcnc.options import KnifeOptions
 
@@ -25,6 +35,17 @@ def test_parser_defaults_match_options() -> None:
     # Every option field is set by the parser and nothing else pretends to be one.
     dests = {action.dest for action in build_parser()._actions}
     assert {field.name for field in fields(KnifeOptions)} <= dests
+
+
+def test_every_knife_option_is_listed_for_the_job_file_check() -> None:
+    parser = build_parser()
+    listed = {
+        option
+        for action in parser._actions
+        for option in action.option_strings
+        if action.dest not in ("help", "version", "debug", "output", "preview", "job")
+    }
+    assert listed == set(KNIFE_OPTIONS)
 
 
 def test_square_end_to_end(fixture: Callable[[str], Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

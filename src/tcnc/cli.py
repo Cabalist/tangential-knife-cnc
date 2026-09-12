@@ -1,4 +1,9 @@
-"""Command line: ``tcnc INPUT.svg [-o OUT.ngc] [--preview OUT.svg] [options]``."""
+"""Command line: ``tcnc INPUT.svg [-o OUT.ngc] [--preview OUT.svg] [options]`` or ``tcnc --job JOB.toml``.
+
+The flat options describe one knife operation. A job file describes any
+number of tools and operations; with ``--job`` only the input, output,
+preview and debugging options may accompany it.
+"""
 
 import argparse
 import math
@@ -13,16 +18,17 @@ from geom2d import GeometryError
 from tcnc import __version__
 from tcnc.errors import OptionError, OutputError, PlanError, SvgError
 from tcnc.gcode import write_program
-from tcnc.options import KnifeOptions
+from tcnc.jobfile import load_job_file
+from tcnc.options import Job, KnifeOptions, as_job
 from tcnc.output import publish
-from tcnc.plan import load_document, plan_job, toolpaths_from_document
+from tcnc.plan import load_document, plan_job
 from tcnc.preview import preview_svg
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from datetime import datetime
 
-    from tcnc.corners import CutPlan
+    from tcnc.corners import JobPlan
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -45,20 +51,73 @@ class RunResult:
 
     output: Path
     preview: Path | None
-    plan: CutPlan
+    plan: JobPlan
+
+
+# Options that describe the single-knife job; they cannot accompany a job file.
+KNIFE_OPTIONS = frozenset(
+    {
+        "--id",
+        "--layer",
+        "--flip-y",
+        "--no-flip-y",
+        "--tolerance",
+        "--biarc-tolerance",
+        "--biarc-max-depth",
+        "--output-precision",
+        "--xy-feed",
+        "--z-feed",
+        "--a-feed",
+        "--z-safe",
+        "--z-depth",
+        "--z-step",
+        "--tool-wait",
+        "--blend-mode",
+        "--blend-tolerance",
+        "--corner-angle",
+        "--overcut",
+        "--blade-offset",
+        "--blade-width",
+        "--a-offset",
+        "--oscillation-mode",
+        "--spindle-speed",
+        "--spindle-wait-on",
+        "--path-sort-method",
+        "--gcode-comments",
+        "--no-gcode-comments",
+        "--gcode-line-numbers",
+        "--no-gcode-line-numbers",
+        "--write-settings",
+        "--no-write-settings",
+    }
+)
 
 
 def build_parser() -> _Parser:
     """The argument parser; every ``KnifeOptions`` field has an option with the same ``dest``."""
     defaults = KnifeOptions()
     parser = _Parser(
-        prog="tcnc", description="Convert an SVG drawing to LinuxCNC G-code for an oscillating tangential knife."
+        prog="tcnc",
+        description=(
+            "Convert an SVG drawing to LinuxCNC G-code for an oscillating tangential knife, "
+            "or run a multi-tool job file."
+        ),
+        allow_abbrev=False,  # an abbreviated knife option must not slip past the --job check
     )
-    parser.add_argument("input", type=Path, help="SVG file to cut")
+    parser.add_argument("input", type=Path, nargs="?", help="SVG file to cut (a job file may name it instead)")
     parser.add_argument("-o", "--output", type=Path, help="G-code file to write (default: INPUT with .ngc)")
     parser.add_argument("--preview", type=Path, metavar="SVG", help="also write a preview of the cut plan")
+    parser.add_argument(
+        "--job", type=Path, metavar="TOML", help="job file with tools and operations (excludes the knife options)"
+    )
     parser.add_argument("--debug", action="store_true", help="show tracebacks on errors")
     parser.add_argument("--version", action="version", version=f"tcnc {__version__}")
+    _knife_arguments(parser, defaults)
+    return parser
+
+
+def _knife_arguments(parser: _Parser, defaults: KnifeOptions) -> None:
+    """Add the single-knife options (every one of them is listed in ``KNIFE_OPTIONS``)."""
 
     inp = parser.add_argument_group("input selection")
     inp.add_argument(
@@ -192,9 +251,9 @@ def build_parser() -> _Parser:
     )
     knife.add_argument(
         "--oscillation-mode",
-        choices=("program", "cut", "off"),
+        choices=("program", "operation", "cut", "off"),
         default=defaults.oscillation_mode,
-        help="when to switch the oscillating head (default: %(default)s)",
+        help="when to switch the oscillating head; program is the same as operation (default: %(default)s)",
     )
     knife.add_argument(
         "--spindle-speed",
@@ -235,7 +294,6 @@ def build_parser() -> _Parser:
         default=defaults.write_settings,
         help="list every option in the G-code header (default: off)",
     )
-    return parser
 
 
 def options_from_namespace(ns: argparse.Namespace) -> KnifeOptions:
@@ -277,27 +335,31 @@ def options_from_namespace(ns: argparse.Namespace) -> KnifeOptions:
     )
 
 
-def run(
-    options: KnifeOptions,
+def run(  # noqa: PLR0913 - one parameter per file involved
+    job: Job | KnifeOptions,
     input_path: Path,
     output_path: Path,
     preview_path: Path | None = None,
     *,
+    job_path: Path | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> RunResult:
-    """Cut ``input_path`` into ``output_path`` (and optionally a preview).
+    """Run ``job`` over ``input_path`` into ``output_path`` (and optionally a preview).
 
     Both files are generated in memory first and then published as one unit
     (see ``tcnc.output``): a failure leaves the previous files as they were.
-    ``now`` overrides the clock used for the header's creation date (tests).
+    ``job_path`` is the job file the job came from, if any; no output may
+    replace it. ``now`` overrides the clock used for the header's creation
+    date (tests).
     """
-    _check_distinct_paths(input_path, output_path, preview_path)
-    document = load_document(input_path, options)
-    toolpaths = toolpaths_from_document(document, options)
-    if not toolpaths:
-        msg = f"no cuttable geometry in {input_path}"
-        raise SvgError(msg)
-    plan = plan_job(toolpaths, options)
+    _check_distinct_paths(input_path, output_path, preview_path, job_path)
+    resolved = as_job(job)
+    document = load_document(input_path, resolved)
+    try:
+        plan = plan_job(document, resolved)
+    except SvgError as exc:
+        msg = f"{exc} in {input_path}" if len(resolved.operations) > 1 else f"no cuttable geometry in {input_path}"
+        raise SvgError(msg) from exc
     outputs: list[tuple[Path, str]] = [(output_path, write_program(plan, now=now))]
     if preview_path is not None:
         outputs.append((preview_path, preview_svg(plan, page=(document.width, document.height))))
@@ -308,24 +370,66 @@ def run(
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point; returns the process exit code."""
     parser = build_parser()
-    namespace = parser.parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    namespace = parser.parse_args(arguments)
     try:
-        options = options_from_namespace(namespace)
-        output = namespace.output or namespace.input.with_suffix(".ngc")
-        result = run(options, namespace.input, output, namespace.preview)
+        job, input_path, output_path, preview_path = _job_and_files(namespace, arguments)
+        result = run(job, input_path, output_path, preview_path, job_path=namespace.job)
     except OptionError as exc:
         return _fail(EXIT_USAGE, exc, debug=namespace.debug)
     except SvgError as exc:
         return _fail(EXIT_SVG, exc, debug=namespace.debug)
     except (PlanError, GeometryError, OutputError) as exc:
         return _fail(EXIT_PLAN, exc, debug=namespace.debug)
-    cuts = len(result.plan.cuts)
-    plural = "s" if cuts != 1 else ""
-    summary = f"{result.output}: {cuts} cut{plural}, {result.plan.cut_length:.3f} mm of cutting"
-    print(summary)  # noqa: T201
+    print(_summary(result))  # noqa: T201
     if result.preview is not None:
         print(f"{result.preview}: preview")  # noqa: T201
     return EXIT_OK
+
+
+def _job_and_files(
+    namespace: argparse.Namespace, arguments: Sequence[str]
+) -> tuple[Job | KnifeOptions, Path, Path, Path | None]:
+    """The job and the input, output and preview paths, from the flat options or from a job file.
+
+    Raises:
+        OptionError: For a missing input, a knife option combined with
+            ``--job``, or a job file that cannot be loaded.
+    """
+    given_input: Path | None = namespace.input
+    given_output: Path | None = namespace.output
+    given_preview: Path | None = namespace.preview
+    if namespace.job is None:
+        if given_input is None:
+            msg = "an SVG file is required unless --job names one"
+            raise OptionError(msg)
+        output = given_output or given_input.with_suffix(".ngc")
+        return options_from_namespace(namespace), given_input, output, given_preview
+    given = [token.split("=", 1)[0] for token in arguments if token.startswith("-")]
+    clashing = sorted({token for token in given if token in KNIFE_OPTIONS})
+    if clashing:
+        msg = f"{', '.join(clashing)} describe the single-knife job and cannot be used with --job"
+        raise OptionError(msg)
+    loaded = load_job_file(namespace.job)
+    input_path = given_input or loaded.input
+    if input_path is None:
+        msg = f"neither the command line nor {namespace.job} names an SVG file"
+        raise OptionError(msg)
+    output_path = given_output or loaded.output or input_path.with_suffix(".ngc")
+    return loaded.job, input_path, output_path, given_preview or loaded.preview
+
+
+def _summary(result: RunResult) -> str:
+    operations = result.plan.operations
+    if len(operations) == 1:
+        cuts = len(operations[0].cuts)
+        plural = "s" if cuts != 1 else ""
+        return f"{result.output}: {cuts} cut{plural}, {result.plan.cut_length:.3f} mm of cutting"
+    parts = [
+        f"{operation.settings.name} {len(operation.cuts)} cut{'s' if len(operation.cuts) != 1 else ''} {operation.cut_length:.3f} mm"
+        for operation in operations
+    ]
+    return f"{result.output}: {', '.join(parts)}"
 
 
 def _fail(code: int, exc: Exception, *, debug: bool) -> int:
@@ -335,10 +439,14 @@ def _fail(code: int, exc: Exception, *, debug: bool) -> int:
     return code
 
 
-def _check_distinct_paths(input_path: Path, output_path: Path, preview_path: Path | None) -> None:
+def _check_distinct_paths(
+    input_path: Path, output_path: Path, preview_path: Path | None, job_path: Path | None = None
+) -> None:
     named = {"input": input_path.resolve(), "output": output_path.resolve()}
     if preview_path is not None:
         named["preview"] = preview_path.resolve()
+    if job_path is not None:
+        named["job file"] = job_path.resolve()
     seen: dict[Path, str] = {}
     for role, resolved in named.items():
         if resolved in seen:

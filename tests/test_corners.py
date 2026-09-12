@@ -8,7 +8,7 @@ import geom2d
 import pytest
 from geom2d import Arc, Line, P
 
-from tcnc.corners import Cut, CutPlan, cuts_for_toolpath, entry_indices, plan_cuts
+from tcnc.corners import Cut, OperationPlan, cuts_for_toolpath, entry_indices, plan_cuts
 from tcnc.errors import PlanError
 from tcnc.options import KnifeOptions
 from tcnc.toolpath import Hints, Segment, Toolpath
@@ -147,9 +147,9 @@ def test_sharp_connectors_are_lift_boundaries() -> None:
 def test_plan_cuts_collects_and_bounds() -> None:
     opts = KnifeOptions(corner_angle=math.radians(15), overcut=0.05)
     plan = plan_cuts([square(), circle()], opts)
-    assert isinstance(plan, CutPlan)
+    assert isinstance(plan, OperationPlan)
     assert len(plan.cuts) == 5
-    assert plan.options is opts
+    assert plan.settings == opts.settings
     box = plan.bounding_box
     assert box is not None
     assert box.xmin == pytest.approx(-1.0)

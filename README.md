@@ -7,10 +7,12 @@ tangent to the cut, and the oscillating head switched like a spindle.
 ```sh
 tcnc drawing.svg -o drawing.ngc --preview drawing-preview.svg \
     --z-depth -1.5 --corner-angle 15 --overcut 1
+tcnc --job box.toml                     # several tools: crease, cut, draw
 ```
 
 Everything is metric: option lengths are millimetres and the G-code is
-written under `G21`.
+written under `G21`. A job file (below) runs several tools, a knife, a
+creasing wheel and a pen, in one program with `T n M6` tool changes.
 
 ## Requirements
 
@@ -91,9 +93,16 @@ or as a tool: `uv tool install .` (or `pipx install .`).
    corner (nearest-neighbour ordering picks a corner when there is one).
 6. **Passes.** `--z-step` cuts each run in several passes down to
    `--z-depth`, lifting to `--z-safe` in between.
-7. **Oscillation.** `--oscillation-mode program` switches the head on once
-   after the header and off before `M2`; `cut` switches it around every
-   plunge; `off` never emits `M3`/`M5`.
+7. **Oscillation.** `--oscillation-mode operation` (or `program`, the
+   same thing) switches the head on once at the start of the operation
+   and off at its end; `cut` switches it around every plunge; `off` never
+   emits `M3`/`M5`.
+8. **Operations and tools** (job files). Each operation cuts one
+   selection with one tool; a tool change (`T n M6` then `G43`, which
+   applies the tool table's offsets) is written whenever the tool differs
+   from the one in use. A knife and a creaser are tangential and lift at
+   corners; a pen parks the A axis once at its mounting angle, never
+   lifts at corners and writes no A words. See "Job files".
 
 The A axis follows the cut tangent (plus `--a-offset` for the blade
 mounting angle). At every corner and every rapid it takes the shortest
@@ -136,20 +145,101 @@ All lengths are in millimetres, times in seconds, angles in degrees.
 | | `--blade-offset` | `0` | blade trail behind the axis (0 = off) |
 | | `--blade-width` | `0` | blade width, for the preview's heading ticks |
 | | `--a-offset` | `0` | blade mounting angle added to every A |
-| | `--oscillation-mode` | `program` | `program`, `cut` or `off` |
+| | `--oscillation-mode` | `program` | `program` (alias of `operation`), `cut` or `off` |
 | | `--spindle-speed` | `0` | `S` word for the head (0 = none) |
 | | `--spindle-wait-on` | `0` | dwell after switching the head on |
 | Paths | `--path-sort-method` | `none` | `none` or `nearest` |
 
 Exit codes: `0` success, `1` bad option or usage (including an output path
-that collides with the input or the preview), `2` SVG problem (missing or
-malformed file, nothing cuttable), `3` geometry, planning or output-file
-failure. Outputs are published as one unit: both files are generated in
+that collides with the input or the preview, and a job file that cannot be
+read or validated), `2` SVG problem (missing or malformed file, nothing
+cuttable, an operation that selects nothing), `3` geometry, planning or
+output-file failure. Outputs are published as one unit: both files are generated in
 memory, written to unique temporary files, and only then moved into place;
 if any step fails, files (or symlinks) already replaced are restored, so a
 failed run leaves the previous G-code and preview exactly as they were,
 and should a restoration itself fail the error names the backup that
 still holds the previous content.
+
+## Job files
+
+`tcnc --job box.toml` runs a TOML job file. It names the tools of the
+machine's tool table, the operations in cutting order, and optionally the
+files; a positional SVG and `-o`/`--preview` on the command line override
+the files, and the knife options above cannot be combined with `--job`.
+
+```toml
+[job]                        # job-wide settings; every key is optional
+input = "box.svg"
+z_safe = 8
+
+[tools.knife]                # one table per tool
+kind = "knife"
+number = 1                   # T number; leave out for the tool already mounted
+spindle_speed = 1000
+
+[tools.creaser]
+kind = "creaser"
+number = 2
+a_offset = 90                # degrees
+corner_angle = 8             # this tool's own lift threshold
+
+[tools.pen]
+kind = "pen"
+number = 3
+
+[[operations]]               # in cutting order
+name = "crease"
+tool = "creaser"
+layers = ["Crease"]
+z_depth = -0.4
+
+[[operations]]
+name = "cut"
+tool = "knife"
+layers = ["Cut"]
+z_depth = -1.5
+overcut = 1.0
+
+[[operations]]
+name = "marks"
+tool = "pen"
+layers = ["Marks"]
+z_depth = -0.5
+z_safe = 3                   # per-operation safe height
+```
+
+Settings resolve operation, then tool, then job, then the built-in
+defaults. `[job]` takes `flip_y`, `tolerance`, `biarc_tolerance`,
+`biarc_max_depth`, `output_precision`, `z_safe`, `blend_mode`,
+`blend_tolerance`, `gcode_comments`, `gcode_line_numbers`,
+`write_settings`, the feeds and `tool_wait`, plus `input`, `output` and
+`preview`. A tool takes `kind`, `number`, `a_offset`, `corner_angle`,
+`blade_offset`, `blade_width`, `oscillation`, `spindle_speed`,
+`spindle_wait_on` and its own feed and wait defaults. An operation takes
+`name`, `tool`, `ids`, `layers`, `z_depth`, `z_step`, `z_safe`, `overcut`,
+`corner_angle`, `sort_method`, `oscillation_mode` and feed and wait
+overrides. Unknown keys are errors; angles are degrees.
+
+The tool kinds: a **knife** oscillates (`M3`/`M5`) by default, follows
+the heading with the A axis and lifts at corners above its threshold
+(15° by default). A **creaser** is tangential too, never oscillates, and
+lifts at corners above its own threshold (10° by default; a wheel cannot
+pivot in the material). A **pen** parks the A axis once at its mounting
+angle, never lifts at corners, has no overcut, no blade offset and a
+single pass. A tool without a number is the one already mounted; it can
+only be used by the leading operations, since the program cannot change
+back to it. Nothing LinuxCNC does itself is repeated: the program does
+not move to a change position, wait for the change or set offsets by
+hand; `G43` after `M6` applies the loaded tool's tool-table offsets, and
+each tool is assumed to have been touched off so that Z0 is the material
+surface. Before every change the program retracts to safe height, for
+the first change in the coordinates active at the start (the header
+cancels tool length compensation), so make sure that height clears the
+material for whatever is mounted, or let `TOOL_CHANGE_QUILL_UP` handle
+the retract. After `G43` every axis is positioned again explicitly,
+since `M6` may have moved the machine and `G43` changes the compensated
+coordinates. The job file itself can never be an output.
 
 ## Machine contract
 
@@ -194,25 +284,32 @@ and an orange dot wherever the knife lifts.
 ## Library
 
 ```python
-from tcnc import KnifeOptions, load_document, plan_job, toolpaths_from_document, write_program
+from tcnc import KnifeOptions, load_document, plan_job, write_program
 
 opts = KnifeOptions(z_depth=-1.5, overcut=1.0, blade_offset=0.2, sort_method="nearest")
 doc = load_document("drawing.svg", opts)  # every loader setting from the options
-plan = plan_job(toolpaths_from_document(doc, opts), opts)  # ordering, compensation, corners
+plan = plan_job(doc, opts)  # selection, ordering, compensation, corners, per operation
 gcode = write_program(plan)
 ```
 
-`load_svg` is the same loader with explicit keyword settings. Every model
-type (`KnifeOptions`, `Hints`, `Segment`, `Toolpath`, `Cut`, `CutPlan`) is
-a frozen, slotted dataclass; `KnifeOptions` is keyword-only. `Toolpath` and
-`Cut` validate that their segments connect within their `tolerance`
-(`None` means geom2d's `EPSILON`), that a closed path or loop meets itself,
-and that arcs sweep at most 90°; `Hints` rejects non-finite angles and a
-rotation that does not lead from its start heading to its end heading.
-`Toolpath.from_geometry` takes the job tolerance and the toolpath carries
-it through ordering, compensation and corner planning into every `Cut`.
-Errors are `ValueError` subclasses: `OptionError`, `SvgError`, `PlanError`,
-`OutputError` (also from `write_preview`), plus `geom2d.GeometryError`.
+A `Job` (tools plus operations) takes the place of `KnifeOptions`
+everywhere; `KnifeOptions.to_job()` is the one-knife job, and
+`load_job_file` reads a TOML job file. `Job.settings` resolves every
+operation into an `OperationSettings` record; `plan_job` returns a
+`JobPlan` of `OperationPlan`s; `plan_toolpaths(toolpaths, job)` plans
+pre-built toolpaths under a single-operation job and `plan_cuts` builds
+the cuts of one operation. `load_svg` is the loader with explicit keyword
+settings; `SvgDocument.select` picks paths by id or layer. Every model
+type is a frozen, slotted dataclass and the settings records are
+keyword-only. `Toolpath` and `Cut` validate that their segments connect
+within their `tolerance` (`None` means geom2d's `EPSILON`), that a closed
+path or loop meets itself, and that arcs sweep at most 90°; `Hints`
+rejects non-finite angles and a rotation that does not lead from its
+start heading to its end heading. `Toolpath.from_geometry` takes the job
+tolerance and the toolpath carries it through ordering, compensation and
+corner planning into every `Cut`. Errors are `ValueError` subclasses:
+`OptionError`, `SvgError`, `PlanError`, `OutputError` (also from
+`write_preview`), plus `geom2d.GeometryError`.
 
 ## Dependencies
 

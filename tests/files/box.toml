@@ -1,0 +1,45 @@
+# Three operations on box.svg: crease the fold lines, cut the outline, draw the marks.
+[job]
+input = "box.svg"
+z_safe = 8
+write_settings = false
+
+[tools.knife]
+kind = "knife"
+number = 1
+spindle_speed = 1000
+spindle_wait_on = 0.5
+
+[tools.creaser]
+kind = "creaser"
+number = 2
+a_offset = 90
+corner_angle = 8
+xy_feed = 400
+
+[tools.pen]
+kind = "pen"
+number = 3
+a_offset = 45
+z_feed = 500
+
+[[operations]]
+name = "crease"
+tool = "creaser"
+layers = ["Crease"]
+z_depth = -0.4
+
+[[operations]]
+name = "cut"
+tool = "knife"
+layers = ["Cut"]
+z_depth = -1.5
+overcut = 1.0
+sort_method = "nearest"
+
+[[operations]]
+name = "marks"
+tool = "pen"
+layers = ["Marks"]
+z_depth = -0.5
+z_safe = 3

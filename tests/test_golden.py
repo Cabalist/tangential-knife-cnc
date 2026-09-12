@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tcnc.cli import run
+from tcnc.jobfile import load_job_file
 from tcnc.options import KnifeOptions
 
 if TYPE_CHECKING:
@@ -50,11 +51,20 @@ CASES: dict[str, tuple[str, KnifeOptions]] = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
+# Multi-tool jobs: a job file and the drawing it names.
+JOB_CASES: dict[str, str] = {"box-job": "box.toml"}
+
+
+@pytest.mark.parametrize("name", sorted(CASES) + sorted(JOB_CASES))
 def test_golden(name: str, fixture: Callable[[str], Path], tmp_path: Path) -> None:
-    svg_name, options = CASES[name]
     out = tmp_path / f"{name}.ngc"
-    run(options, fixture(svg_name), out, now=lambda: FIXED_NOW)
+    if name in JOB_CASES:
+        loaded = load_job_file(fixture(JOB_CASES[name]))
+        assert loaded.input is not None
+        run(loaded.job, loaded.input, out, now=lambda: FIXED_NOW)
+    else:
+        svg_name, options = CASES[name]
+        run(options, fixture(svg_name), out, now=lambda: FIXED_NOW)
     produced = out.read_text()
     golden = GOLDEN_DIR / f"{name}.ngc"
     if os.environ.get("TCNC_UPDATE_GOLDEN"):

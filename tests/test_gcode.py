@@ -7,11 +7,10 @@ from itertools import pairwise
 import pytest
 from geom2d import Arc, Line, P
 
-from tcnc.corners import plan_cuts
 from tcnc.errors import PlanError
 from tcnc.gcode import GCodeWriter, write_program
 from tcnc.options import KnifeOptions
-from tcnc.plan import plan_job
+from tcnc.plan import plan_toolpaths
 from tcnc.toolpath import Segment, Toolpath
 from tests.test_corners import circle, square
 
@@ -108,7 +107,9 @@ def test_rounded_endpoints_on_one_ray_do_not_become_a_full_turn() -> None:
     arc = Arc.from_sweep(P(radius, 0), P.from_polar(radius, sweep), radius, sweep)
     tp = Toolpath.from_geometry([arc], tolerance=1e-6)
     assert tp is not None
-    text = write_program(plan_job([tp], KnifeOptions(gcode_comments=False, tolerance=1e-6)), now=lambda: FIXED_NOW)
+    text = write_program(
+        plan_toolpaths([tp], KnifeOptions(gcode_comments=False, tolerance=1e-6)), now=lambda: FIXED_NOW
+    )
     assert not [line for line in body(text) if line.startswith(("G2 ", "G3 "))]
     assert all(sweep <= math.pi / 2 + 1e-9 for sweep in written_sweeps(text))
 
@@ -129,7 +130,7 @@ def test_arc_end_rounding_onto_the_centre_is_a_straight_move() -> None:
 
 def test_written_sweeps_match_the_plan_for_real_arcs() -> None:
     opts = KnifeOptions(overcut=0.5, blade_offset=0.3, gcode_comments=False)
-    text = write_program(plan_job([circle(), square()], opts), now=lambda: FIXED_NOW)
+    text = write_program(plan_toolpaths([circle(), square()], opts), now=lambda: FIXED_NOW)
     sweeps = written_sweeps(text)
     assert sweeps
     assert all(sweep <= math.pi / 2 + 1e-6 for sweep in sweeps)
@@ -204,7 +205,7 @@ def test_write_program_square_layout() -> None:
     opts = KnifeOptions(
         corner_angle=math.radians(15), overcut=0.05, z_depth=-0.06, spindle_speed=1000, spindle_wait_on=1.5
     )
-    text = write_program(plan_cuts([square()], opts), now=lambda: FIXED_NOW)
+    text = write_program(plan_toolpaths([square()], opts), now=lambda: FIXED_NOW)
     lines = body(text)
     assert lines.count("M3 S1000") == 1
     assert lines.count("M5") == 1
@@ -222,7 +223,7 @@ def test_write_program_square_layout() -> None:
 
 def test_write_program_passes_and_cut_mode() -> None:
     opts = KnifeOptions(z_depth=-0.2, z_step=0.1, oscillation_mode="cut", overcut=0.0)
-    text = write_program(plan_cuts([circle()], opts), now=lambda: FIXED_NOW)
+    text = write_program(plan_toolpaths([circle()], opts), now=lambda: FIXED_NOW)
     lines = body(text)
     assert lines.count("M3") == 2
     assert lines.count("M5") == 2
@@ -236,7 +237,7 @@ def test_arcs_start_on_their_circle_after_a_tolerated_gap() -> None:
     arc = Segment(Arc.from_sweep(P(1, 0), P(0, 1), 1.0, math.pi / 2))
     tp = Toolpath((line, arc), tolerance=0.01)
     opts = KnifeOptions(overcut=0.0, corner_angle=math.pi, gcode_comments=False, tolerance=0.01)
-    text = write_program(plan_cuts([tp], opts), now=lambda: FIXED_NOW)
+    text = write_program(plan_toolpaths([tp], opts), now=lambda: FIXED_NOW)
     lines = body(text)
     g3 = next(index for index, line in enumerate(lines) if line.startswith("G3 "))
     assert lines[g3 - 2] == "G1 A90.000 F60.000"  # rotate in place at the joint
@@ -248,7 +249,7 @@ def test_shortest_rotation_across_pi() -> None:
     opts = KnifeOptions(overcut=0.0, corner_angle=math.pi)
     left_up = Toolpath.from_geometry([Line(P(0, 0), P(-1, 0.05)), Line(P(-1, 0.05), P(-2, 0))])
     assert left_up is not None
-    text = write_program(plan_cuts([left_up], opts), now=lambda: FIXED_NOW)
+    text = write_program(plan_toolpaths([left_up], opts), now=lambda: FIXED_NOW)
     a_words = [word for line in body(text) for word in line.split() if word.startswith("A")]
     values = [float(word[1:]) for word in a_words]
     assert values[0] == pytest.approx(177.1376, abs=1e-3)

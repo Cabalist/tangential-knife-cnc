@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+     width="100mm" height="60mm" viewBox="0 0 100 60">
+  <g inkscape:groupmode="layer" id="layer1" inkscape:label="Cut">
+    <rect id="outline" x="10" y="10" width="80" height="40" fill="none" stroke="#000" stroke-width="0.2"/>
+  </g>
+  <g inkscape:groupmode="layer" id="layer2" inkscape:label="Crease">
+    <path id="fold1" d="M 30,10 L 30,50" fill="none" stroke="#00f" stroke-width="0.2"/>
+    <path id="fold2" d="M 70,10 L 70,50" fill="none" stroke="#00f" stroke-width="0.2"/>
+  </g>
+  <g inkscape:groupmode="layer" id="layer3" inkscape:label="Marks">
+    <path id="mark" d="M 40,25 L 60,25 L 60,35" fill="none" stroke="#888" stroke-width="0.2"/>
+    <circle id="dot" cx="50" cy="42" r="3" fill="none" stroke="#888" stroke-width="0.2"/>
+  </g>
+</svg>

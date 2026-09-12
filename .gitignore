@@ -41,3 +41,5 @@ t2.*
 # Ignore annoying Mac-specific file system stuff
 .DS_Store
 .Trash
+# Proprietary layout samples dropped in the root for local testing are never committed.
+*.zip

@@ -1,14 +1,16 @@
 """Standalone SVG preview of a cut plan.
 
 The picture is drawn in millimetres with Y up, so it matches the part as
-seen on the machine: cuts in red, lead-in and overcut in a lighter red,
-rapid moves as dashed green lines, blade heading ticks along the cuts and
-a marker wherever the knife lifts.
+seen on the machine: knife cuts in red, creases in blue, pen marks in
+black, lead-in and overcut in a lighter tint, rapid moves as dashed green
+lines, blade heading ticks along the tangential cuts, a marker wherever
+the tool lifts, and a legend when the job has more than one operation.
 """
 
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from xml.sax.saxutils import escape
 
 from geom2d import Arc, Box, Line, P
 
@@ -18,13 +20,13 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
-    from tcnc.corners import Cut, CutPlan
+    from tcnc.corners import Cut, JobPlan, OperationPlan
     from tcnc.toolpath import Segment
 
-CUT_COLOR = "#d62728"
-EXTENSION_COLOR = "#f4a6a6"
+KIND_COLORS = {"knife": "#d62728", "creaser": "#1f77b4", "pen": "#000000"}
+EXTENSION_COLORS = {"knife": "#f4a6a6", "creaser": "#a6c8e8", "pen": "#8c8c8c"}
 RAPID_COLOR = "#2ca02c"
-TICK_COLOR = "#1f77b4"
+TICK_COLOR = "#7f7f7f"
 LIFT_COLOR = "#ff7f0e"
 DEFAULT_TICKS_PER_PAGE = 60
 # Heading ticks are a display aid: however small the blade, a plan never gets more than about this many.
@@ -61,31 +63,53 @@ class _Canvas:
         return f"{fmt(p.x)},{fmt(self.y(p.y))}"
 
 
-def preview_svg(plan: CutPlan, *, page: tuple[float, float] | None = None) -> str:
+def preview_svg(plan: JobPlan, *, page: tuple[float, float] | None = None) -> str:
     """Return the preview as SVG text."""
     canvas = _canvas(plan, page)
     size = f'width="{fmt(canvas.width)}mm" height="{fmt(canvas.height)}mm"'
     view = f'viewBox="{fmt(canvas.xmin)} {fmt(canvas.ymin)} {fmt(canvas.width)} {fmt(canvas.height)}"'
     background = f'<rect x="{fmt(canvas.xmin)}" y="{fmt(canvas.ymin)}" width="{fmt(canvas.width)}" height="{fmt(canvas.height)}" fill="white"/>'
     parts: list[str] = [f'<svg xmlns="http://www.w3.org/2000/svg" {size} {view}>', background]
-    tick_length = plan.options.blade_width or max(canvas.width, canvas.height) / DEFAULT_TICKS_PER_PAGE
-    spacing = max(tick_length * 2.0, plan.cut_length / MAX_TICKS)
+    default_tick = max(canvas.width, canvas.height) / DEFAULT_TICKS_PER_PAGE
+    total_length = plan.cut_length
     previous_end: P | None = None
-    for cut in plan.cuts:
-        if previous_end is not None:
-            parts.append(_rapid(canvas, previous_end, cut.start))
-        parts.extend(_cut(canvas, cut, tick_length, spacing))
-        previous_end = cut.end
+    for operation in plan.operations:
+        settings = operation.settings
+        tick_length = settings.tool.blade_width or default_tick
+        spacing = max(tick_length * 2.0, total_length / MAX_TICKS)
+        for cut in operation.cuts:
+            if previous_end is not None:
+                parts.append(_rapid(canvas, previous_end, cut.start))
+            parts.extend(_cut(canvas, cut, settings.tool.kind, tick_length, spacing, ticks=settings.tangential))
+            previous_end = cut.end
+    if len(plan.operations) > 1:
+        parts.extend(_legend(canvas, plan.operations))
     parts.append("</svg>")
     return "\n".join(parts) + "\n"
 
 
-def write_preview(plan: CutPlan, path: Path | str, *, page: tuple[float, float] | None = None) -> None:
+def _legend(canvas: _Canvas, operations: Iterable[OperationPlan]) -> list[str]:
+    """One line of text per operation, in its colour, in the top-left corner."""
+    size = max(canvas.width, canvas.height) / 40.0
+    parts: list[str] = []
+    for index, operation in enumerate(operations, 1):
+        tool = operation.settings.tool
+        x, y = canvas.xmin + size, canvas.ymin + size * (index + 0.5)
+        number = f", T{tool.number}" if tool.number is not None else ""
+        label = escape(f"{index}. {operation.settings.name} ({tool.kind}{number})")
+        parts.append(
+            f'<text x="{fmt(x)}" y="{fmt(y)}" font-size="{fmt(size)}" font-family="sans-serif" '
+            f'fill="{KIND_COLORS[tool.kind]}">{label}</text>'
+        )
+    return parts
+
+
+def write_preview(plan: JobPlan, path: Path | str, *, page: tuple[float, float] | None = None) -> None:
     """Write the preview SVG to ``path`` (atomically; ``OutputError`` on failure)."""
     publish([(path, preview_svg(plan, page=page))])
 
 
-def _canvas(plan: CutPlan, page: tuple[float, float] | None) -> _Canvas:
+def _canvas(plan: JobPlan, page: tuple[float, float] | None) -> _Canvas:
     box = plan.bounding_box
     if page is not None:
         width, height = page
@@ -107,14 +131,17 @@ def _rapid(canvas: _Canvas, start: P, end: P) -> str:
     )
 
 
-def _cut(canvas: _Canvas, cut: Cut, tick_length: float, spacing: float) -> list[str]:
+def _cut(  # noqa: PLR0913 - one keyword per drawing choice
+    canvas: _Canvas, cut: Cut, kind: str, tick_length: float, spacing: float, *, ticks: bool
+) -> list[str]:
     parts: list[str] = []
     if cut.lead_in is not None:
-        parts.append(_path(canvas, [cut.lead_in], EXTENSION_COLOR, canvas.stroke))
-    parts.append(_path(canvas, cut.core, CUT_COLOR, canvas.stroke))
+        parts.append(_path(canvas, [cut.lead_in], EXTENSION_COLORS[kind], canvas.stroke))
+    parts.append(_path(canvas, cut.core, KIND_COLORS[kind], canvas.stroke))
     if cut.overcut is not None:
-        parts.append(_path(canvas, [cut.overcut], EXTENSION_COLOR, canvas.stroke))
-    parts.extend(_ticks(canvas, cut.core, tick_length, spacing))
+        parts.append(_path(canvas, [cut.overcut], EXTENSION_COLORS[kind], canvas.stroke))
+    if ticks:
+        parts.extend(_ticks(canvas, cut.core, tick_length, spacing))
     r = fmt(canvas.stroke * 2)
     parts.append(f'<circle cx="{fmt(cut.end.x)}" cy="{fmt(canvas.y(cut.end.y))}" r="{r}" fill="{LIFT_COLOR}"/>')
     return parts

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from tcnc.errors import OptionError
-from tcnc.options import BlendMode, KnifeOptions, OscillationMode, SortMethod
+from tcnc.options import BlendMode, KnifeOptions, KnifeOscillationMode, SortMethod
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -34,7 +34,7 @@ def test_defaults_are_valid_and_hashable() -> None:
         lambda: KnifeOptions(corner_angle=0.0),
         lambda: KnifeOptions(corner_angle=math.pi + 0.1),
         lambda: KnifeOptions(overcut=-0.01),
-        lambda: KnifeOptions(oscillation_mode=cast("OscillationMode", "always")),
+        lambda: KnifeOptions(oscillation_mode=cast("KnifeOscillationMode", "always")),
         lambda: KnifeOptions(sort_method=cast("SortMethod", "optimize")),
         lambda: KnifeOptions(blend_mode=cast("BlendMode", "")),
         lambda: KnifeOptions(xy_feed=0.0),
@@ -126,8 +126,9 @@ def test_pass_depths_single_and_stepped() -> None:
 
 def test_settings_lines_show_degrees() -> None:
     lines = KnifeOptions(corner_angle=math.radians(20)).as_settings_lines()
-    assert "corner_angle = 20 deg" in lines
-    assert "tolerance = 0.01" in lines
+    assert "tool knife: corner_angle = 20 deg" in lines
+    assert "job: tolerance = 0.01" in lines
+    assert "operation cut: z_depth = -1.0" in lines
 
 
 def test_output_resolution() -> None:

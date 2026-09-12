@@ -1,5 +1,6 @@
 """SVG loading: millimetre scale, flip, transforms, filters, conversion, error paths."""
 
+import dataclasses
 import math
 from typing import TYPE_CHECKING
 
@@ -24,7 +25,8 @@ def mm(*inches: float) -> P:
 
 
 def load(fixture: Path, *, flip_y: bool = True, ids: tuple[str, ...] = (), layers: tuple[str, ...] = ()) -> SvgDocument:
-    return load_svg(fixture, flip_y=flip_y, ids=ids, layers=layers)
+    document = load_svg(fixture, flip_y=flip_y)
+    return dataclasses.replace(document, paths=document.select(ids=ids, layers=layers))
 
 
 def drawing(tmp_path: Path, body: str, *, size: str = 'width="96" height="96"') -> Path:
@@ -210,7 +212,9 @@ def test_clones_are_included_and_selectable(tmp_path: Path) -> None:
     clone = next(p for p in doc.paths if p.source_id == "one").geometry[0]
     assert isinstance(clone, Line)
     assert clone.p1.almost_equal(P(10 * MM_PER_PX, 0))
-    assert [p.source_id for p in load_svg(path, ids=("inst",)).paths] == ["one"]
+    assert [p.source_id for p in load_svg(path).select(ids=("inst",))] == ["one"]
+    (one,) = load_svg(path).select(ids=("one",))
+    assert one.clones == ("inst",)
 
 
 def test_degenerate_paths_are_dropped(fixture: Callable[[str], Path]) -> None:
@@ -261,17 +265,25 @@ def test_thin_ellipse_is_not_replaced_by_its_chord(tmp_path: Path) -> None:
 
 def test_ellipse_work_limit_is_an_error_not_a_guess(tmp_path: Path) -> None:
     path = drawing(tmp_path, '<path id="e" d="M100 0 A100 50 0 0 1 0 50"/>', size='width="384" height="384"')
+    document = load_svg(path, curve_tolerance=1e-30)  # the problem is recorded, not raised, until selected
     with pytest.raises(SvgError, match=r"element e.*cannot be approximated"):
-        load_svg(path, curve_tolerance=1e-30)
+        document.select()
 
 
 def test_anisotropic_transform_is_not_degenerate(tmp_path: Path) -> None:
     path = drawing(tmp_path, '<path transform="scale(1000000000 1)" d="M0 0 L0.000000096 96"/>')
     (svg_path,) = load_svg(path, flip_y=False).paths
     assert svg_path.geometry[0].p2.distance(mm(1, 1)) < 1e-9
-    singular = drawing(tmp_path, '<path transform="scale(1 0)" d="M0 0 L10 10"/>')
+    singular = drawing(
+        tmp_path, '<path id="flat" transform="scale(1 0)" d="M0 0 L10 10"/><path id="ok" d="M0 0 L10 10"/>'
+    )
+    document = load_svg(singular)
+    assert [problem.source_id for problem in document.problems] == ["flat"]
+    assert [path.source_id for path in document.select(ids=("ok",))] == ["ok"]  # the broken element is not wanted
     with pytest.raises(SvgError, match="degenerate"):
-        load_svg(singular)
+        document.select(ids=("flat",))
+    with pytest.raises(SvgError, match="degenerate"):
+        document.select()  # everything includes it
 
 
 def test_physical_page_size_does_not_touch_px_content(tmp_path: Path) -> None:
@@ -294,7 +306,7 @@ def test_error_paths_raise_svg_error(tmp_path: Path) -> None:
         load_svg(broken)
     malformed = drawing(tmp_path, '<path d="M0 0L30"/><path d="M0 0L20 20"/>')
     with pytest.raises(SvgError, match="cannot parse"):
-        load_svg(malformed)
+        load_svg(malformed)  # path data errors come from the parser and stop the whole load
     not_svg = tmp_path / "root.svg"
     not_svg.write_text("<root/>")
     with pytest.raises(SvgError):

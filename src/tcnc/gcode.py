@@ -9,6 +9,18 @@ Machine contract:
   controller has it.
 - The A axis is an unwrapped rotary axis: values accumulate across closed
   shapes and every move takes the shortest rotation from the current value.
+  A pen operation parks the A axis once at the pen's mounting angle and
+  writes no other A word.
+- Tools: a numbered tool is selected with ``T n M6`` followed by ``G43``,
+  which applies the loaded tool's offsets from the controller's tool table
+  (LinuxCNC does not apply them on ``M6`` by itself). The program retracts
+  to safe height before every change (for the first change, in the
+  coordinates active at the start) and the oscillation is off; it writes
+  no dwell around the change, the controller blocks until it is confirmed.
+  ``M6`` may move the axes and ``G43`` changes the compensated coordinates,
+  so the writer forgets every cached axis value at a change and positions
+  Z, X, Y and A explicitly afterwards. A tool without a number is the one
+  already mounted.
 - Every word is written at ``output_precision`` decimals, and the writer
   tracks the *rounded* values it wrote, so modal suppression, arc
   validation and the choice of feed see what the controller sees. An arc
@@ -38,12 +50,12 @@ from geom2d import Arc, Line, P
 
 from tcnc import __version__
 from tcnc.errors import PlanError
+from tcnc.options import Job, KnifeOptions, OperationSettings, Tool, as_job
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
-    from tcnc.corners import Cut, CutPlan
-    from tcnc.options import KnifeOptions
+    from tcnc.corners import Cut, JobPlan, OperationPlan
 
 # LinuxCNC dialect ------------------------------------------------------------
 PROGRAM_DELIMITER = "%"
@@ -64,6 +76,8 @@ ARC_CCW = "G3"
 DWELL = "G4"
 SPINDLE_ON_CW = "M3"
 SPINDLE_OFF = "M5"
+TOOL_CHANGE = "M6"
+TOOL_OFFSETS = "G43"
 END_PROGRAM = "M2"
 COMMENT_PREFIX = ";"
 # LinuxCNC rejects an arc whose start and end radii differ by more than this (mm).
@@ -126,10 +140,16 @@ class AxisState:
 
 
 class GCodeWriter:
-    """Accumulates G-code lines for one program."""
+    """Accumulates G-code lines for one program.
 
-    def __init__(self, options: KnifeOptions, *, now: Callable[[], datetime] | None = None) -> None:
-        self.options = options
+    ``job`` holds the program-wide settings; ``settings`` is the operation
+    whose feeds and tool the motion methods use, set by ``write_program``
+    as it moves from operation to operation (initially the first one).
+    """
+
+    def __init__(self, job: Job | KnifeOptions, *, now: Callable[[], datetime] | None = None) -> None:
+        self.job = as_job(job)
+        self.settings: OperationSettings = self.job.settings[0]
         self.state = AxisState()
         self.lines: list[str] = []
         self._now = now or (lambda: datetime.now(UTC))
@@ -148,12 +168,12 @@ class GCodeWriter:
 
     def comment(self, text: str) -> None:
         """Write a comment (one output line per input line), if comments are enabled."""
-        if self.options.gcode_comments:
+        if self.job.gcode_comments:
             self.lines.extend(f"{COMMENT_PREFIX} {line}" for line in comment_lines(text))
 
     def blank(self) -> None:
         """Write an empty line, if comments are enabled (they carry the layout)."""
-        if self.options.gcode_comments:
+        if self.job.gcode_comments:
             self.lines.append("")
 
     def command(self, code: str, *, comment: str | None = None) -> None:
@@ -212,8 +232,8 @@ class GCodeWriter:
         if self.state.x is None or self.state.y is None:
             msg = "an arc needs a known XY start position"
             raise PlanError(msg)
-        precision = self.options.output_precision
-        resolution = self.options.output_resolution
+        precision = self.job.output_precision
+        resolution = self.job.output_resolution
         start = P(self.state.x, self.state.y)
         end_rounded = P(round(end.x, precision), round(end.y, precision))
         offset = center - start
@@ -257,19 +277,38 @@ class GCodeWriter:
 
     def spindle_on(self) -> None:
         """Start the oscillating head and wait for it to come up to speed."""
-        speed = self.options.spindle_speed
-        self._write(f"{SPINDLE_ON_CW} S{speed}" if speed > 0 else SPINDLE_ON_CW, "oscillation on")
-        self.dwell(self.options.spindle_wait_on)
+        tool = self.settings.tool
+        self._write(
+            f"{SPINDLE_ON_CW} S{tool.spindle_speed}" if tool.spindle_speed > 0 else SPINDLE_ON_CW, "oscillation on"
+        )
+        self.dwell(tool.spindle_wait_on)
 
     def spindle_off(self) -> None:
         """Stop the oscillating head."""
         self._write(SPINDLE_OFF, "oscillation off")
 
+    def tool_change(self, tool: Tool) -> None:
+        """Select ``tool`` (``T n M6``) and apply its offsets from the tool table (``G43``).
+
+        Raises:
+            PlanError: For a tool without a number (it is mounted; there is nothing to change to).
+        """
+        if tool.number is None:
+            msg = f"tool {tool.name!r} has no number to change to"
+            raise PlanError(msg)
+        self._write(f"T{tool.number} {TOOL_CHANGE}", f"tool change: {tool.name} ({tool.kind})")
+        self.command(TOOL_OFFSETS, comment="tool offsets from the tool table")
+        self.forget_position()
+
+    def forget_position(self) -> None:
+        """Drop every cached axis value: the next move writes all its words (the feed stays modal)."""
+        self.state = AxisState(feed=self.state.feed)
+
     # program layout -------------------------------------------------------
 
     def header(self, extra_comments: Iterable[str] = ()) -> None:
         """Program delimiter, provenance comments and modal setup."""
-        opts = self.options
+        opts = self.job
         self.raw(PROGRAM_DELIMITER)
         self.comment(f"Generated by tcnc {__version__}")
         self.comment(f"Created {self._now().isoformat(timespec='seconds')}")
@@ -278,7 +317,7 @@ class GCodeWriter:
             self.comment(text)
         if opts.write_settings:
             self.comment("Settings:")
-            for line in opts.as_settings_lines():
+            for line in opts.settings_lines():
                 self.comment(f"  {line}")
         self.blank()
         self.command(PLANE_XY, comment="XY plane")
@@ -296,7 +335,7 @@ class GCodeWriter:
                 self.command(BLEND, comment="blend at best speed")
         elif opts.blend_mode == "exact":
             self.command(EXACT_PATH, comment="exact path mode")
-        self._motion(Move(None, feed=opts.xy_feed, comment="default feed"))
+        self._motion(Move(None, feed=self.settings.xy_feed, comment="default feed"))
         self.blank()
 
     def footer(self) -> None:
@@ -311,18 +350,18 @@ class GCodeWriter:
         """The feed for the axis words actually written, in X/Y/Z/A order: XY, else Z, else A."""
         x, y, z, a = words
         if x is not None or y is not None:
-            return self.options.xy_feed
+            return self.settings.xy_feed
         if z is not None:
-            return self.options.z_feed
+            return self.settings.z_feed
         if a is not None:
-            return self.options.a_feed
-        return self.options.xy_feed
+            return self.settings.a_feed
+        return self.settings.xy_feed
 
     def _axis_word(self, letter: str, value: float | None, last: float | None) -> tuple[str | None, float | None]:
         """The word to write for an axis, and the rounded value to record (``None`` = unchanged)."""
         if value is None:
             return None, None
-        rounded = round(value, self.options.output_precision)
+        rounded = round(value, self.job.output_precision)
         if rounded == 0.0:
             rounded = 0.0
         if last is not None and rounded == last:
@@ -346,7 +385,7 @@ class GCodeWriter:
             return
         feed = move.feed
         if feed is None and move.code in (FEED, ARC_CW, ARC_CCW):
-            feed = self.options.xy_feed if move.code != FEED else self._default_feed([word for word, _ in axes])
+            feed = self.settings.xy_feed if move.code != FEED else self._default_feed([word for word, _ in axes])
         feed_word, feed_new = (None, None) if feed is None else self._axis_word("F", feed, state.feed)
         if feed_word is not None:
             words.append(feed_word)
@@ -362,16 +401,16 @@ class GCodeWriter:
         self._write(prefix + " ".join(words), move.comment)
 
     def _write(self, line: str, comment: str | None) -> None:
-        if self.options.gcode_line_numbers:
+        if self.job.gcode_line_numbers:
             line = f"N{self._line_number} {line}"
             self._line_number += 1
-        if comment and self.options.gcode_comments:
+        if comment and self.job.gcode_comments:
             inline = " | ".join(part for part in comment_lines(comment) if part)
             line = f"{line}  {COMMENT_PREFIX} {inline}"
         self.lines.append(line)
 
     def _fmt(self, value: float) -> str:
-        return format_word(value, self.options.output_precision)
+        return format_word(value, self.job.output_precision)
 
 
 def _turn_toward(current: float, heading: float) -> float:
@@ -392,28 +431,71 @@ def _written_sweep(start: P, end: P, centre: P, *, clockwise: bool) -> float:
     return math.tau if turn == 0.0 else turn
 
 
-def write_program(plan: CutPlan, *, now: Callable[[], datetime] | None = None) -> str:
-    """Lay out the whole program for ``plan`` and return its text."""
-    opts = plan.options
-    depths = opts.pass_depths
-    writer = GCodeWriter(opts, now=now)
-    writer.header([f"Cuts: {len(plan.cuts)}", f"Passes per cut: {len(depths)}"])
-    if opts.oscillation_mode == "program":
-        writer.spindle_on()
-    writer.rapid(z=opts.z_safe, comment="safe height")
+def write_program(plan: JobPlan, *, now: Callable[[], datetime] | None = None) -> str:
+    """Lay out the whole program for ``plan`` and return its text.
+
+    Operations follow each other in order; a tool change is written only
+    when the tool differs from the one in use, and never for a tool without
+    a number (the one mounted before the program starts).
+    """
+    job = plan.job
+    writer = GCodeWriter(job, now=now)
+    operations = plan.operations
+    count = len(operations)
+    if count == 1:
+        (only,) = operations
+        extras = [f"Cuts: {len(only.cuts)}", f"Passes per cut: {only.settings.pass_count}"]
+    else:
+        extras = [f"Operations: {count}", f"Cuts: {len(plan.cuts)}"]
+    writer.header(extras)
     current_a = 0.0
-    for index, cut in enumerate(plan.cuts, 1):
-        writer.blank()
-        writer.comment(_cut_label(cut, index, len(plan.cuts)))
-        for pass_index, depth in enumerate(depths, 1):
-            if len(depths) > 1:
-                writer.comment(f"pass {pass_index}/{len(depths)} at Z{format_word(depth, opts.output_precision)}")
-            current_a = _write_cut(writer, cut, depth, current_a)
-    writer.blank()
-    if opts.oscillation_mode == "program":
-        writer.spindle_off()
+    current_tool: Tool | None = None
+    safe_before = operations[0].settings.z_safe
+    for index, operation in enumerate(operations, 1):
+        settings = operation.settings
+        writer.settings = settings
+        tool = settings.tool
+        if count > 1 or tool.number is not None:
+            writer.comment(_operation_label(settings, index, count))
+        if (current_tool is None or tool.name != current_tool.name) and tool.number is not None:
+            # Already there after the previous lift; written at the start of the program, whose Z is unknown.
+            writer.rapid(z=safe_before, comment="safe height before the tool change")
+            writer.tool_change(tool)
+        current_tool = tool
+        current_a = _write_operation(writer, operation, current_a)
+        safe_before = settings.z_safe
     writer.footer()
     return writer.text()
+
+
+def _write_operation(writer: GCodeWriter, operation: OperationPlan, current_a: float) -> float:
+    """Switch the head, lift to the operation's safe height, park a pen and write its cuts; returns the A value."""
+    settings = operation.settings
+    if settings.oscillation_mode == "operation":
+        writer.spindle_on()
+    writer.rapid(z=settings.z_safe, comment="safe height")
+    if not settings.tangential:
+        current_a = _turn_toward(current_a, settings.a_offset)
+        writer.rapid(a=current_a, comment="park the pen at its mounting angle")
+    depths = settings.pass_depths
+    precision = writer.job.output_precision
+    for cut_index, cut in enumerate(operation.cuts, 1):
+        writer.blank()
+        writer.comment(_cut_label(cut, cut_index, len(operation.cuts)))
+        for pass_index, depth in enumerate(depths, 1):
+            if len(depths) > 1:
+                writer.comment(f"pass {pass_index}/{len(depths)} at Z{format_word(depth, precision)}")
+            current_a = _write_cut(writer, cut, depth, current_a)
+    writer.blank()
+    if settings.oscillation_mode == "operation":
+        writer.spindle_off()
+    return current_a
+
+
+def _operation_label(settings: OperationSettings, index: int, count: int) -> str:
+    tool = settings.tool
+    number = f", T{tool.number}" if tool.number is not None else ""
+    return f"Operation {index}/{count}: {settings.name} ({tool.kind}{number})"
 
 
 def _cut_label(cut: Cut, index: int, count: int) -> str:
@@ -423,28 +505,36 @@ def _cut_label(cut: Cut, index: int, count: int) -> str:
 
 
 def _write_cut(writer: GCodeWriter, cut: Cut, depth: float, current_a: float) -> float:
-    opts = writer.options
-    current_a = _turn_toward(current_a, cut.start_heading + opts.a_offset)
-    writer.rapid(x=cut.start.x, y=cut.start.y, a=current_a)
-    if opts.oscillation_mode == "cut":
+    """One pass over ``cut``; returns the A value the axis ends at (unchanged for a non-tangential tool)."""
+    settings = writer.settings
+    tangential = settings.tangential
+    if tangential:
+        current_a = _turn_toward(current_a, cut.start_heading + settings.a_offset)
+        writer.rapid(x=cut.start.x, y=cut.start.y, a=current_a)
+    else:
+        writer.rapid(x=cut.start.x, y=cut.start.y)
+    if settings.oscillation_mode == "cut":
         writer.spindle_on()
     writer.feed(z=depth, comment="plunge")
-    writer.dwell(opts.tool_wait)
+    writer.dwell(settings.tool_wait)
     for segment in cut.segments:
-        # Both feeds below are suppressed by the writer when the rounded words do not change.
-        start_a = _turn_toward(current_a, segment.start_heading + opts.a_offset)
-        writer.feed(a=start_a, comment="rotate in place")
-        current_a = start_a
-        end_a = current_a + segment.rotation
+        end_a: float | None = None
+        if tangential:
+            # Both feeds below are suppressed by the writer when the rounded words do not change.
+            start_a = _turn_toward(current_a, segment.start_heading + settings.a_offset)
+            writer.feed(a=start_a, comment="rotate in place")
+            current_a = start_a
+            end_a = current_a + segment.rotation
         match segment.geom:
             case Line(p2=end):
                 writer.feed(x=end.x, y=end.y, a=end_a)
             case Arc(p1=start, p2=end, center=center, angle=sweep):
                 writer.feed(x=start.x, y=start.y)
                 writer.arc(end=end, center=center, sweep=sweep, a=end_a)
-        current_a = end_a
-    writer.rapid(z=opts.z_safe, comment="lift")
-    writer.dwell(opts.tool_wait)
-    if opts.oscillation_mode == "cut":
+        if end_a is not None:
+            current_a = end_a
+    writer.rapid(z=settings.z_safe, comment="lift")
+    writer.dwell(settings.tool_wait)
+    if settings.oscillation_mode == "cut":
         writer.spindle_off()
     return current_a

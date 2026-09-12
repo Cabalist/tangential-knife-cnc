@@ -9,9 +9,9 @@ import pytest
 from geom2d import Line, P
 from svgelements import svgelements as se
 
-from tcnc.corners import plan_cuts
 from tcnc.errors import OutputError
 from tcnc.options import KnifeOptions
+from tcnc.plan import plan_toolpaths
 from tcnc.preview import MAX_TICKS, preview_svg, write_preview
 from tcnc.toolpath import Hints, Segment
 from tests.test_corners import circle, square
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 def test_preview_parses_and_has_one_element_per_feature(tmp_path: Path) -> None:
     opts = KnifeOptions(corner_angle=math.radians(15), overcut=0.05, blade_width=0.1)
-    plan = plan_cuts([square(), circle()], opts)
+    plan = plan_toolpaths([square(), circle()], opts)
     text = preview_svg(plan, page=(4.0, 4.0))
     path = tmp_path / "p.svg"
     path.write_text(text)
@@ -41,17 +41,17 @@ def test_preview_parses_and_has_one_element_per_feature(tmp_path: Path) -> None:
     # The circle at the origin extends the 4 mm page to 5 mm.
     assert 'width="5mm"' in text
     assert 'viewBox="-1 -1 5 5"' in text
-    inside = preview_svg(plan_cuts([square()], KnifeOptions(overcut=0.0)), page=(4.0, 4.0))
+    inside = preview_svg(plan_toolpaths([square()], KnifeOptions(overcut=0.0)), page=(4.0, 4.0))
     assert 'width="4mm" height="4mm" viewBox="0 0 4 4"' in inside
 
 
 def test_empty_plan_renders() -> None:
-    text = preview_svg(plan_cuts([], KnifeOptions()))
+    text = preview_svg(plan_toolpaths([], KnifeOptions()))
     assert text.startswith("<svg ")
 
 
 def test_preview_geometry_stays_inside_the_viewbox() -> None:
-    text = preview_svg(plan_cuts([circle()], KnifeOptions()), page=(4, 4))
+    text = preview_svg(plan_toolpaths([circle()], KnifeOptions()), page=(4, 4))
     xml = ET.fromstring(text)
     _, ymin, _, height = map(float, xml.attrib["viewBox"].split())
     core = next(element for element in xml if element.tag.endswith("path"))
@@ -65,7 +65,7 @@ def test_preview_heading_matches_shortest_rotation() -> None:
 
 
 def test_tick_count_is_bounded_however_small_the_blade(tmp_path: Path) -> None:
-    plan = plan_cuts([square()], KnifeOptions(blade_width=1e-300))
+    plan = plan_toolpaths([square()], KnifeOptions(blade_width=1e-300))
     text = preview_svg(plan)
     ticks = [line for line in text.splitlines() if "<line" in line and "stroke-dasharray" not in line]
     assert 0 < len(ticks) <= MAX_TICKS + len(plan.cuts)

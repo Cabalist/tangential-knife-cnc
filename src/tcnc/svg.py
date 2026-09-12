@@ -28,6 +28,7 @@ declares and px content keeps its exact px scale. Visibility policy:
 elements are skipped; opacity, clipping and masks are not considered.
 """
 
+import dataclasses
 import io
 import math
 import re
@@ -71,20 +72,75 @@ _LENGTH_RE = re.compile(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*([a-zA-Z%]*)\s
 
 @dataclass(frozen=True, slots=True)
 class SvgPath:
-    """One subpath from the drawing, already in millimetres."""
+    """One subpath from the drawing, already in millimetres, with what it can be selected by.
+
+    ``groups`` are the Inkscape labels and ids of the groups above the
+    element, ``clones`` the ids of the ``<use>`` elements it came through.
+    """
 
     geometry: tuple[SourceGeometry, ...]
     source_id: str | None
     closed: bool
+    groups: tuple[str, ...] = ()
+    clones: tuple[str, ...] = ()
+
+    def selected_by(self, *, ids: Sequence[str] = (), layers: Sequence[str] = ()) -> bool:
+        """True when the path matches the selection (an empty selection matches everything)."""
+        return _selected(self.source_id, self.groups, self.clones, ids=ids, layers=layers)
+
+
+@dataclass(frozen=True, slots=True)
+class SvgProblem:
+    """An element that could not be converted, reported only when a selection asks for it."""
+
+    source_id: str | None
+    groups: tuple[str, ...]
+    clones: tuple[str, ...]
+    message: str
+
+    def selected_by(self, *, ids: Sequence[str] = (), layers: Sequence[str] = ()) -> bool:
+        """True when the selection would include this element."""
+        return _selected(self.source_id, self.groups, self.clones, ids=ids, layers=layers)
+
+
+def _selected(
+    source_id: str | None,
+    groups: Sequence[str],
+    clones: Sequence[str],
+    *,
+    ids: Sequence[str],
+    layers: Sequence[str],
+) -> bool:
+    wanted_ids, wanted_layers = frozenset(ids), frozenset(layers)
+    if wanted_ids and source_id not in wanted_ids and not wanted_ids.intersection(clones):
+        return False
+    return not wanted_layers or bool(wanted_layers.intersection(groups))
 
 
 @dataclass(frozen=True, slots=True)
 class SvgDocument:
-    """The cuttable content of an SVG file in millimetres."""
+    """The visible content of an SVG file in millimetres.
+
+    ``problems`` are the elements that could not be converted (a degenerate
+    transform, malformed geometry); they only matter when a selection
+    includes them, so ``select`` raises for them then and not before.
+    """
 
     paths: tuple[SvgPath, ...]
     width: float
     height: float
+    problems: tuple[SvgProblem, ...] = ()
+
+    def select(self, *, ids: Sequence[str] = (), layers: Sequence[str] = ()) -> tuple[SvgPath, ...]:
+        """The paths matching ``ids`` (element ids or clone ids) and ``layers`` (group labels or ids).
+
+        Raises:
+            SvgError: When the selection includes an element that could not be converted.
+        """
+        for problem in self.problems:
+            if problem.selected_by(ids=ids, layers=layers):
+                raise SvgError(problem.message)
+        return tuple(path for path in self.paths if path.selected_by(ids=ids, layers=layers))
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,19 +213,17 @@ def _singular_values(matrix: se.Matrix) -> tuple[float, float]:
     return big, small
 
 
-def load_svg(  # noqa: PLR0913 - keyword-only loader settings
+def load_svg(
     path: Path | str,
     *,
     flip_y: bool = True,
-    ids: Sequence[str] = (),
-    layers: Sequence[str] = (),
     tolerance: float | None = None,
     curve_tolerance: float = 0.01,
 ) -> SvgDocument:
-    """Read ``path`` and return its cuttable geometry in millimetres.
+    """Read ``path`` and return its visible geometry in millimetres.
 
-    ``ids`` keeps elements with those ids (or clones of them); ``layers``
-    keeps elements inside a group whose Inkscape label or id matches.
+    Every visible path is returned with the group names and clone ids it
+    can be selected by (``SvgDocument.select``).
     ``tolerance`` (mm, default geom2d's ``EPSILON``) is the distance at
     which a circular arc's radius and sweep are validated against, and if
     need be repaired to, its endpoints. ``curve_tolerance`` (mm) bounds the
@@ -181,23 +235,24 @@ def load_svg(  # noqa: PLR0913 - keyword-only loader settings
         msg = f"SVG file {path} has no usable width/height (both attributes are required on the root element)"
         raise SvgError(msg)
     frame = _Frame(scale=MM_PER_PX, height_px=height_px, flip_y=flip_y)
-    wanted_ids = frozenset(ids)
-    wanted_layers = frozenset(layers)
     paths: list[SvgPath] = []
+    problems: list[SvgProblem] = []
     for shape, groups, clones in _shapes(svg, (), ()):
         if shape.values.get("visibility") == "hidden":
             continue
         shape_id = shape.id if isinstance(shape.id, str) else None
-        if wanted_ids and shape_id not in wanted_ids and not wanted_ids.intersection(clones):
-            continue
-        if wanted_layers and not wanted_layers.intersection(groups):
-            continue
         mapping = _Mapping(shape.transform, frame)
         if _singular_values(mapping.matrix)[1] <= 0.0:
-            msg = f"element {shape_id or '<unnamed>'} has a degenerate transform"
-            raise SvgError(msg)
-        paths.extend(_convert_shape(shape, shape_id, mapping, tolerance, curve_tolerance))
-    return SvgDocument(tuple(paths), width=width_px * MM_PER_PX, height=height_px * MM_PER_PX)
+            message = f"element {shape_id or '<unnamed>'} has a degenerate transform"
+            problems.append(SvgProblem(shape_id, groups, clones, message))
+            continue
+        try:
+            converted = _convert_shape(shape, shape_id, mapping, tolerance, curve_tolerance)
+        except SvgError as exc:
+            problems.append(SvgProblem(shape_id, groups, clones, str(exc)))
+            continue
+        paths.extend(dataclasses.replace(path, groups=groups, clones=clones) for path in converted)
+    return SvgDocument(tuple(paths), width=width_px * MM_PER_PX, height=height_px * MM_PER_PX, problems=tuple(problems))
 
 
 def _parse(path: Path | str) -> se.SVG:
