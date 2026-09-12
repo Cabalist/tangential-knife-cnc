@@ -3,18 +3,16 @@
 Rewritten in 2026 from utlco/utl-tcnc by Claude Zervas (LGPL-3.0).
 """
 
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 
-try:
-    __version__ = version("utl-tcnc")
-except PackageNotFoundError:  # pragma: no cover - source checkout without metadata
-    __version__ = "0.0.0"
+__version__ = version("utl-tcnc")
 
 from tcnc.corners import Cut, CutPlan, plan_cuts
-from tcnc.errors import OptionError, PlanError, SvgError, TcncError
+from tcnc.errors import OptionError, OutputError, PlanError, SvgError, TcncError
 from tcnc.gcode import write_program
 from tcnc.options import KnifeOptions
 from tcnc.ordering import order_toolpaths
+from tcnc.plan import load_document, plan_job, toolpaths_from_document
 from tcnc.preview import preview_svg, write_preview
 from tcnc.svg import SvgDocument, SvgPath, load_svg
 from tcnc.toolpath import Hints, Segment, Toolpath
@@ -25,6 +23,7 @@ __all__ = [
     "Hints",
     "KnifeOptions",
     "OptionError",
+    "OutputError",
     "PlanError",
     "Segment",
     "SvgDocument",
@@ -33,10 +32,13 @@ __all__ = [
     "TcncError",
     "Toolpath",
     "__version__",
+    "load_document",
     "load_svg",
     "order_toolpaths",
     "plan_cuts",
+    "plan_job",
     "preview_svg",
+    "toolpaths_from_document",
     "write_preview",
     "write_program",
 ]

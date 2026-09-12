@@ -15,17 +15,20 @@ G40  ; no cutter compensation
 G49  ; no tool length compensation
 F250.000  ; default feed
 
+M3  ; oscillation on
 G0 Z10.000  ; safe height
 
 ; Cut 1/1: loop from circle, 4 segment(s)
-G0 X76.200 Y50.800 A-90.000
+G0 X76.200 Y45.800 A-90.000
 G1 Z-1.000  ; plunge
-G2 X50.800 Y25.400 A-180.000 I-25.400 J0.000
-G2 X25.400 Y50.800 A-270.000 I0.000 J25.400
-G2 X50.800 Y76.200 A-360.000 I25.400 J0.000
-G2 X76.200 Y50.800 A-450.000 I0.000 J-25.400
+G2 X45.800 Y25.400 A-180.000 I-25.400 J5.000
+G2 X25.400 Y55.800 A-270.000 I5.000 J25.400
+G2 X55.800 Y76.200 A-360.000 I25.400 J-5.000
+G2 X76.200 Y45.800 A-450.000 I-5.000 J-25.400
+G2 X74.768 Y41.018 A-461.066 I-25.400 J5.000
 G0 Z10.000  ; lift
 
+M5  ; oscillation off
 
 M2  ; end of program
 %

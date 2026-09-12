@@ -1,29 +1,36 @@
 """Knife job options: one frozen record with every value in internal units.
 
-Internal units are G-code lengths (inches or millimetres as selected),
-seconds for time and radians for angles. ``from_namespace`` is the only
-place command-line values are converted, so nothing downstream converts.
+Internal units are millimetres for lengths (the G-code is metric, ``G21``),
+seconds for time and radians for angles. The command line converts degrees
+to radians in ``tcnc.cli``; nothing downstream converts anything.
+
+``tolerance`` is the job's distance resolution: two points closer than it
+are the same point, pieces shorter than it carry no geometry, and every
+geom2d call that takes a tolerance receives it. It must not be finer than
+geom2d's own numerical floor (``const.EPSILON``).
+
+Machine contract encoded here: the material surface is Z = 0, cutting
+depths are below it, and ``z_safe`` clears the surface and every pass. The
+machine reads words rounded to ``output_precision`` decimals, so the
+heights, steps and feeds are validated on their rounded values, and the
+number of passes is bounded (``MAX_PASSES``).
 """
 
 import math
-from dataclasses import dataclass, fields, replace
-from typing import TYPE_CHECKING, Literal
+from dataclasses import dataclass, fields
+from typing import Literal
+
+from geom2d import const
 
 from tcnc.errors import OptionError
 
-if TYPE_CHECKING:
-    import argparse
-
-type Units = Literal["in", "mm"]
-type BlendMode = Literal["", "blend", "exact"]
+type BlendMode = Literal["default", "blend", "exact"]
 type OscillationMode = Literal["program", "cut", "off"]
 type SortMethod = Literal["none", "nearest"]
 
-_DEG_TO_RAD_FIELDS = frozenset({"corner_angle", "a_offset"})
-_TUPLE_FIELDS = frozenset({"ids", "layers"})
-_PX_PER_INCH = 96.0
-# svgelements' own millimetre factor (truncated); see tcnc.svg.PX_PER_MM.
-_PX_PER_MM = 3.7795296
+ANGLE_FIELDS = frozenset({"corner_angle", "a_offset"})
+MAX_PASSES = 1000
+_PASS_SLACK = 1e-9
 
 
 def _require(*, condition: bool, message: str) -> None:
@@ -31,29 +38,28 @@ def _require(*, condition: bool, message: str) -> None:
         raise OptionError(message)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class KnifeOptions:
     """Everything a knife job needs, validated and in internal units."""
 
-    # Units and orientation
-    gcode_units: Units = "in"
+    # Orientation
     flip_y: bool = True
 
-    # Geometry conversion
-    tolerance: float = 1e-6
-    biarc_tolerance: float = 0.001
-    biarc_max_depth: int = 4
-    output_precision: int = 4
+    # Geometry conversion (mm)
+    tolerance: float = 0.01
+    biarc_tolerance: float = 0.01
+    biarc_max_depth: int = 8
+    output_precision: int = 3
 
-    # Machine
-    xy_feed: float = 10.0
-    z_feed: float = 10.0
+    # Machine: heights in mm, feeds in mm per minute and degrees per minute, waits in seconds
+    xy_feed: float = 250.0
+    z_feed: float = 250.0
     a_feed: float = 60.0
-    z_safe: float = 1.0
-    z_depth: float = -0.25
+    z_safe: float = 10.0
+    z_depth: float = -1.0
     z_step: float = 0.0
     tool_wait: float = 0.0
-    blend_mode: BlendMode = ""
+    blend_mode: BlendMode = "default"
     blend_tolerance: float = 0.0
 
     # Knife behaviour (angles in radians)
@@ -79,36 +85,45 @@ class KnifeOptions:
     layers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """Validate ranges and cross-field consistency."""
+        """Validate finiteness, ranges and cross-field consistency."""
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, float):
+                _require(condition=math.isfinite(value), message=f"{field.name} must be a finite number, got {value!r}")
+        floor = const.EPSILON
         _require(
-            condition=self.gcode_units in ("in", "mm"),
-            message=f"gcode_units must be 'in' or 'mm', got {self.gcode_units!r}",
+            condition=self.tolerance >= floor,
+            message=f"tolerance must be at least geom2d's EPSILON ({floor!r}), got {self.tolerance!r}",
         )
-        _require(condition=self.tolerance > 0.0, message=f"tolerance must be > 0, got {self.tolerance!r}")
         _require(
-            condition=self.biarc_tolerance > 0.0, message=f"biarc_tolerance must be > 0, got {self.biarc_tolerance!r}"
+            condition=self.biarc_tolerance >= floor,
+            message=f"biarc_tolerance must be at least geom2d's EPSILON ({floor!r}), got {self.biarc_tolerance!r}",
         )
         _require(
             condition=self.biarc_max_depth >= 0, message=f"biarc_max_depth must be >= 0, got {self.biarc_max_depth!r}"
         )
         _require(
-            condition=self.output_precision >= 0,
-            message=f"output_precision must be >= 0, got {self.output_precision!r}",
+            condition=0 <= self.output_precision <= 9,
+            message=f"output_precision must be 0..9, got {self.output_precision!r}",
         )
         for name in ("xy_feed", "z_feed", "a_feed"):
             value = getattr(self, name)
             _require(condition=value > 0.0, message=f"{name} must be > 0, got {value!r}")
         _require(
-            condition=self.z_safe > self.z_depth,
-            message=f"z_safe ({self.z_safe!r}) must be above z_depth ({self.z_depth!r})",
+            condition=self.z_depth < 0.0,
+            message=f"z_depth is measured down from the material surface at Z=0 and must be < 0, got {self.z_depth!r}",
+        )
+        _require(
+            condition=self.z_safe > 0.0, message=f"z_safe must clear the material surface at Z=0, got {self.z_safe!r}"
         )
         _require(
             condition=self.z_step >= 0.0, message=f"z_step must be >= 0 (0 means a single pass), got {self.z_step!r}"
         )
+        self._check_rounded()
         _require(condition=self.tool_wait >= 0.0, message=f"tool_wait must be >= 0 seconds, got {self.tool_wait!r}")
         _require(
-            condition=self.blend_mode in ("", "blend", "exact"),
-            message=f"blend_mode must be '', 'blend' or 'exact', got {self.blend_mode!r}",
+            condition=self.blend_mode in ("default", "blend", "exact"),
+            message=f"blend_mode must be 'default', 'blend' or 'exact', got {self.blend_mode!r}",
         )
         _require(
             condition=self.blend_tolerance >= 0.0, message=f"blend_tolerance must be >= 0, got {self.blend_tolerance!r}"
@@ -134,57 +149,75 @@ class KnifeOptions:
             message=f"sort_method must be 'none' or 'nearest', got {self.sort_method!r}",
         )
 
-    @classmethod
-    def from_namespace(cls, namespace: argparse.Namespace) -> KnifeOptions:
-        """Build options from parsed command-line arguments.
+    def _check_rounded(self) -> None:
+        """The machine sees rounded words: heights, the step and the feeds must survive rounding."""
+        places = self.output_precision
+        resolution = self.output_resolution
+        _require(
+            condition=round(self.z_safe, places) > 0.0,
+            message=f"z_safe {self.z_safe!r} rounds to Z0 at {places} decimals; it must be at least {resolution:g}",
+        )
+        _require(
+            condition=round(self.z_depth, places) < 0.0,
+            message=f"z_depth {self.z_depth!r} rounds to Z0 at {places} decimals; it must be at most -{resolution:g}",
+        )
+        _require(
+            condition=self.z_step == 0.0 or round(self.z_step, places) > 0.0,
+            message=f"z_step {self.z_step!r} rounds to zero at {places} decimals; use 0 for a single pass",
+        )
+        for name in ("xy_feed", "z_feed", "a_feed"):
+            value = getattr(self, name)
+            _require(
+                condition=round(value, places) > 0.0,
+                message=f"{name} {value!r} rounds to F0 at {places} decimals; it must be at least {resolution:g}",
+            )
+        _require(
+            condition=self.blend_tolerance == 0.0 or round(self.blend_tolerance, places) > 0.0,
+            message=f"blend_tolerance {self.blend_tolerance!r} rounds to zero at {places} decimals",
+        )
+        if self.z_step > 0.0:
+            count = self._nominal_pass_count()
+            _require(
+                condition=count <= MAX_PASSES,
+                message=f"z_depth {self.z_depth!r} at z_step {self.z_step!r} needs {count} passes; at most {MAX_PASSES}",
+            )
 
-        Angles arrive in degrees and are converted to radians here; every
-        other value is already in internal units. Attributes the namespace
-        does not define keep their defaults; attributes it defines that are
-        not options are ignored.
-        """
-        values: dict[str, object] = {}
-        for field in fields(cls):
-            if not hasattr(namespace, field.name):
-                continue
-            value = getattr(namespace, field.name)
-            if value is None:
-                continue
-            if field.name in _DEG_TO_RAD_FIELDS:
-                value = math.radians(float(value))
-            elif field.name in _TUPLE_FIELDS:
-                value = tuple(str(item) for item in value)
-            values[field.name] = value
-        return replace(cls(), **values)
-
-    @property
-    def unit_scale_from_px(self) -> float:
-        """Multiplier that turns svgelements px (96 per inch) into G-code units."""
-        return 1.0 / _PX_PER_INCH if self.gcode_units == "in" else 1.0 / _PX_PER_MM
+    def _nominal_pass_count(self) -> int:
+        """Passes of ``z_step`` needed to reach ``z_depth`` (float noise forgiven); the step is known to be positive."""
+        return max(1, math.ceil(-self.z_depth / self.z_step - _PASS_SLACK))
 
     @property
     def pass_depths(self) -> tuple[float, ...]:
-        """Z depths of the successive passes, ending exactly at ``z_depth``."""
-        if self.z_step <= 0.0 or self.z_depth >= 0.0:
-            return (self.z_depth,)
-        depths: list[float] = []
-        depth = 0.0
-        while True:
-            depth -= self.z_step
-            if depth <= self.z_depth + self.tolerance:
-                depths.append(self.z_depth)
-                return tuple(depths)
-            depths.append(depth)
+        """Z depths of the successive passes, ending exactly at ``z_depth``.
 
-    def with_(self, **changes: object) -> KnifeOptions:
-        """Return a validated copy with the given fields replaced."""
-        return replace(self, **changes)
+        Every increment is at most ``z_step``. A penultimate pass that
+        rounds to the same word as the final depth is left out, so no pass
+        is written twice.
+        """
+        if self.z_step <= 0.0:
+            return (self.z_depth,)
+        count = self._nominal_pass_count()
+        depths = [-(index + 1) * self.z_step for index in range(count - 1)]
+        places = self.output_precision
+        if depths and round(depths[-1], places) == round(self.z_depth, places):
+            depths.pop()
+        return (*depths, self.z_depth)
+
+    @property
+    def pass_count(self) -> int:
+        """Number of passes actually written."""
+        return len(self.pass_depths)
+
+    @property
+    def output_resolution(self) -> float:
+        """The smallest length difference the G-code words can express."""
+        return 10.0**-self.output_precision
 
     def as_settings_lines(self) -> tuple[str, ...]:
         """Human-readable ``name = value`` lines for the G-code header."""
         lines: list[str] = []
         for field in fields(self):
             value = getattr(self, field.name)
-            text = f"{math.degrees(value):g} deg" if field.name in _DEG_TO_RAD_FIELDS else str(value)
+            text = f"{math.degrees(value):g} deg" if field.name in ANGLE_FIELDS else str(value)
             lines.append(f"{field.name} = {text}")
         return tuple(lines)

@@ -11,19 +11,18 @@ from typing import TYPE_CHECKING, NoReturn, override
 from geom2d import GeometryError
 
 from tcnc import __version__
-from tcnc.corners import CutPlan, plan_cuts
-from tcnc.errors import OptionError, PlanError, SvgError
+from tcnc.errors import OptionError, OutputError, PlanError, SvgError
 from tcnc.gcode import write_program
-from tcnc.offset import offset_toolpath
 from tcnc.options import KnifeOptions
-from tcnc.ordering import order_toolpaths
-from tcnc.preview import write_preview
-from tcnc.svg import load_svg
-from tcnc.toolpath import Toolpath
+from tcnc.output import publish
+from tcnc.plan import load_document, plan_job, toolpaths_from_document
+from tcnc.preview import preview_svg
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from datetime import datetime
+
+    from tcnc.corners import CutPlan
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -50,7 +49,7 @@ class RunResult:
 
 
 def build_parser() -> _Parser:
-    """The argument parser; option names match ``KnifeOptions`` field names."""
+    """The argument parser; every ``KnifeOptions`` field has an option with the same ``dest``."""
     defaults = KnifeOptions()
     parser = _Parser(
         prog="tcnc", description="Convert an SVG drawing to LinuxCNC G-code for an oscillating tangential knife."
@@ -68,7 +67,7 @@ def build_parser() -> _Parser:
         action="append",
         default=[],
         metavar="ID",
-        help="cut only elements with this id (repeatable)",
+        help="cut only elements with this id, or clones of it (repeatable)",
     )
     inp.add_argument(
         "--layer",
@@ -79,13 +78,7 @@ def build_parser() -> _Parser:
         help="cut only elements in this Inkscape layer label or group id (repeatable)",
     )
 
-    units = parser.add_argument_group("units and geometry")
-    units.add_argument(
-        "--gcode-units",
-        choices=("in", "mm"),
-        default=defaults.gcode_units,
-        help="G-code and option length units (default: %(default)s)",
-    )
+    units = parser.add_argument_group("geometry (all lengths in mm)")
     units.add_argument(
         "--flip-y",
         action=argparse.BooleanOptionalAction,
@@ -93,7 +86,10 @@ def build_parser() -> _Parser:
         help="put the machine origin at the bottom left (default: on)",
     )
     units.add_argument(
-        "--tolerance", type=float, default=defaults.tolerance, help="geometry tolerance (default: %(default)s)"
+        "--tolerance",
+        type=float,
+        default=defaults.tolerance,
+        help="job resolution: points closer than this coincide, shorter pieces are merged (default: %(default)s)",
     )
     units.add_argument(
         "--biarc-tolerance",
@@ -114,21 +110,27 @@ def build_parser() -> _Parser:
         help="decimal places in G-code words (default: %(default)s)",
     )
 
-    machine = parser.add_argument_group("machine")
+    machine = parser.add_argument_group("machine (mm; material surface is Z0)")
     machine.add_argument(
-        "--xy-feed", type=float, default=defaults.xy_feed, help="XY feed rate, units/min (default: %(default)s)"
+        "--xy-feed", type=float, default=defaults.xy_feed, help="XY feed rate, mm/min (default: %(default)s)"
     )
     machine.add_argument(
-        "--z-feed", type=float, default=defaults.z_feed, help="Z plunge feed rate, units/min (default: %(default)s)"
+        "--z-feed", type=float, default=defaults.z_feed, help="Z plunge feed rate, mm/min (default: %(default)s)"
     )
     machine.add_argument(
         "--a-feed", type=float, default=defaults.a_feed, help="A axis feed rate, deg/min (default: %(default)s)"
     )
     machine.add_argument(
-        "--z-safe", type=float, default=defaults.z_safe, help="Z height for rapid moves (default: %(default)s)"
+        "--z-safe",
+        type=float,
+        default=defaults.z_safe,
+        help="Z height for rapid moves, above the surface (default: %(default)s)",
     )
     machine.add_argument(
-        "--z-depth", type=float, default=defaults.z_depth, help="final cutting depth (default: %(default)s)"
+        "--z-depth",
+        type=float,
+        default=defaults.z_depth,
+        help="final cutting depth, at or below the surface (default: %(default)s)",
     )
     machine.add_argument(
         "--z-step",
@@ -144,9 +146,9 @@ def build_parser() -> _Parser:
     )
     machine.add_argument(
         "--blend-mode",
-        choices=("", "blend", "exact"),
+        choices=("default", "blend", "exact"),
         default=defaults.blend_mode,
-        help="trajectory blending: '' (controller default), blend (G64) or exact (G61)",
+        help="trajectory blending: default (leave the controller's), blend (G64) or exact (G61)",
     )
     machine.add_argument(
         "--blend-tolerance",
@@ -155,7 +157,7 @@ def build_parser() -> _Parser:
         help="G64 P tolerance when blending (default: %(default)s)",
     )
 
-    knife = parser.add_argument_group("knife")
+    knife = parser.add_argument_group("knife (mm)")
     knife.add_argument(
         "--corner-angle",
         type=float,
@@ -236,6 +238,45 @@ def build_parser() -> _Parser:
     return parser
 
 
+def options_from_namespace(ns: argparse.Namespace) -> KnifeOptions:
+    """Build ``KnifeOptions`` from parsed arguments, field by field.
+
+    Angles arrive in degrees and are converted to radians here; ``ids`` and
+    ``layers`` become tuples. A missing attribute is a programming error
+    (the parser defines every field), not user input.
+    """
+    return KnifeOptions(
+        flip_y=ns.flip_y,
+        tolerance=ns.tolerance,
+        biarc_tolerance=ns.biarc_tolerance,
+        biarc_max_depth=ns.biarc_max_depth,
+        output_precision=ns.output_precision,
+        xy_feed=ns.xy_feed,
+        z_feed=ns.z_feed,
+        a_feed=ns.a_feed,
+        z_safe=ns.z_safe,
+        z_depth=ns.z_depth,
+        z_step=ns.z_step,
+        tool_wait=ns.tool_wait,
+        blend_mode=ns.blend_mode,
+        blend_tolerance=ns.blend_tolerance,
+        corner_angle=math.radians(ns.corner_angle),
+        overcut=ns.overcut,
+        blade_offset=ns.blade_offset,
+        blade_width=ns.blade_width,
+        a_offset=math.radians(ns.a_offset),
+        oscillation_mode=ns.oscillation_mode,
+        spindle_speed=ns.spindle_speed,
+        spindle_wait_on=ns.spindle_wait_on,
+        sort_method=ns.sort_method,
+        gcode_comments=ns.gcode_comments,
+        gcode_line_numbers=ns.gcode_line_numbers,
+        write_settings=ns.write_settings,
+        ids=tuple(str(item) for item in ns.ids),
+        layers=tuple(str(item) for item in ns.layers),
+    )
+
+
 def run(
     options: KnifeOptions,
     input_path: Path,
@@ -246,38 +287,21 @@ def run(
 ) -> RunResult:
     """Cut ``input_path`` into ``output_path`` (and optionally a preview).
 
+    Both files are generated in memory first and then published as one unit
+    (see ``tcnc.output``): a failure leaves the previous files as they were.
     ``now`` overrides the clock used for the header's creation date (tests).
     """
-    document = load_svg(
-        input_path,
-        unit_scale=options.unit_scale_from_px,
-        flip_y=options.flip_y,
-        ids=options.ids,
-        layers=options.layers,
-        tolerance=options.tolerance,
-    )
-    toolpaths: list[Toolpath] = []
-    for svg_path in document.paths:
-        toolpath = Toolpath.from_geometry(
-            svg_path.geometry,
-            biarc_tolerance=options.biarc_tolerance,
-            biarc_max_depth=options.biarc_max_depth,
-            source_id=svg_path.source_id,
-        )
-        if toolpath is not None:
-            toolpaths.append(toolpath)
+    _check_distinct_paths(input_path, output_path, preview_path)
+    document = load_document(input_path, options)
+    toolpaths = toolpaths_from_document(document, options)
     if not toolpaths:
         msg = f"no cuttable geometry in {input_path}"
         raise SvgError(msg)
-    toolpaths = order_toolpaths(toolpaths, options.sort_method)
-    if options.blade_offset > 0.0:
-        min_chord = 10.0**-options.output_precision
-        toolpaths = [offset_toolpath(tp, options.blade_offset, min_arc_chord=min_chord) for tp in toolpaths]
-    plan = plan_cuts(toolpaths, options)
-    text = write_program(plan, now=now)
-    _write_atomically(output_path, text)
+    plan = plan_job(toolpaths, options)
+    outputs: list[tuple[Path, str]] = [(output_path, write_program(plan, now=now))]
     if preview_path is not None:
-        write_preview(plan, preview_path, page=(document.width, document.height))
+        outputs.append((preview_path, preview_svg(plan, page=(document.width, document.height))))
+    publish(outputs)
     return RunResult(output_path, preview_path, plan)
 
 
@@ -286,18 +310,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     namespace = parser.parse_args(argv)
     try:
-        options = KnifeOptions.from_namespace(namespace)
+        options = options_from_namespace(namespace)
         output = namespace.output or namespace.input.with_suffix(".ngc")
         result = run(options, namespace.input, output, namespace.preview)
     except OptionError as exc:
         return _fail(EXIT_USAGE, exc, debug=namespace.debug)
     except SvgError as exc:
         return _fail(EXIT_SVG, exc, debug=namespace.debug)
-    except (PlanError, GeometryError) as exc:
+    except (PlanError, GeometryError, OutputError) as exc:
         return _fail(EXIT_PLAN, exc, debug=namespace.debug)
     cuts = len(result.plan.cuts)
     plural = "s" if cuts != 1 else ""
-    summary = f"{result.output}: {cuts} cut{plural}, {result.plan.cut_length:.3f} {options.gcode_units} of cutting"
+    summary = f"{result.output}: {cuts} cut{plural}, {result.plan.cut_length:.3f} mm of cutting"
     print(summary)  # noqa: T201
     if result.preview is not None:
         print(f"{result.preview}: preview")  # noqa: T201
@@ -311,7 +335,13 @@ def _fail(code: int, exc: Exception, *, debug: bool) -> int:
     return code
 
 
-def _write_atomically(path: Path, text: str) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+def _check_distinct_paths(input_path: Path, output_path: Path, preview_path: Path | None) -> None:
+    named = {"input": input_path.resolve(), "output": output_path.resolve()}
+    if preview_path is not None:
+        named["preview"] = preview_path.resolve()
+    seen: dict[Path, str] = {}
+    for role, resolved in named.items():
+        if resolved in seen:
+            msg = f"{role} and {seen[resolved]} are the same file: {resolved}"
+            raise OptionError(msg)
+        seen[resolved] = role

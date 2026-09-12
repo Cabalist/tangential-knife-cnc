@@ -1,10 +1,13 @@
 """Toolpath ordering."""
 
+import math
+
 from geom2d import Line, P
 
 from tcnc.ordering import order_toolpaths, oriented_toward
 from tcnc.toolpath import Toolpath
 from tests.test_corners import square
+from tests.test_toolpath import rounded_square
 
 
 def segment_path(x1: float, y1: float, x2: float, y2: float) -> Toolpath:
@@ -30,6 +33,17 @@ def test_closed_path_starts_at_nearest_vertex() -> None:
     assert rotated.start == P(2, 2)
     assert distance < 0.2
     assert rotated.closed
+
+
+def test_closed_path_prefers_a_corner_when_corners_exist() -> None:
+    tp = Toolpath.from_geometry(rounded_square())
+    assert tp is not None
+    # No corners: any vertex; the nearest to (4.1, 1.1) is the arc end (4, 1).
+    rotated, _ = oriented_toward(tp, P(4.1, 1.1), corner_angle=math.radians(15))
+    assert rotated.start == P(4, 1)
+    # Corners everywhere on the square: the nearest corner wins.
+    rotated, _ = oriented_toward(square(), P(1.2, 1.9), corner_angle=math.radians(15))
+    assert rotated.start == P(2, 2)
 
 
 def test_open_path_keeps_direction_on_tie() -> None:

@@ -1,16 +1,41 @@
 """Load cut geometry from an SVG file.
 
-svgelements does the parsing: it applies the viewBox and every transform
-and hands back px coordinates at 96 px per inch. This module walks the
-element tree, applies the visibility, ``--id`` and ``--layer`` filters,
-converts each subpath into geom2d lines, circular arcs and cubic Béziers,
-scales to G-code units and flips Y so the machine frame has Y up.
+svgelements parses the file, applies the viewBox and composes every
+transform into a per-shape matrix; this module does the rest explicitly so
+no geometry passes through the parser's own transformed-arc representation
+(which is only exact for similarity transforms):
+
+- every point goes through the shape's affine matrix exactly;
+- a circular arc under a similarity transform stays a circular arc, with
+  its sense of rotation taken from the matrix determinant and the Y flip,
+  built from its exact endpoints and validated at the job tolerance;
+- an elliptical arc, or any arc under a shear or non-uniform scale, becomes
+  cubic Béziers, refined until a sampled error estimate meets the curve
+  tolerance or an explicit error is raised;
+- an arc with a zero radius, or with identical endpoints, is what SVG says
+  it is (a straight line; nothing);
+- malformed path data raises ``SvgError`` instead of being skipped.
+
+The loader converts faithfully; only exactly empty pieces are left out. The
+job's resolution (dropping or merging pieces too short to matter, closure)
+is applied later by ``Toolpath.from_geometry``.
+
+Units: the output is millimetres. The root element's physical ``width`` and
+``height`` are converted to CSS px exactly (96 per inch) before the parser
+sees them, so a page declared in mm, cm, in, pt or pc has the exact size it
+declares and px content keeps its exact px scale. Visibility policy:
+``display:none`` elements (removed by the parser) and ``visibility="hidden"``
+elements are skipped; opacity, clipping and masks are not considered.
 """
 
+import io
+import math
+import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from geom2d import Arc, CubicBezier, Line, P
+from geom2d import Arc, CubicBezier, GeometryError, Line, P
 from svgelements import svgelements as se
 
 from tcnc.errors import SvgError
@@ -19,28 +44,43 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from pathlib import Path
 
+    from tcnc.toolpath import SourceGeometry
+
 PX_PER_INCH = 96.0
-# svgelements converts millimetres with this truncated factor rather than 96 / 25.4;
-# inverting the same number makes mm documents come back exact.
-PX_PER_MM = 3.7795296
+MM_PER_INCH = 25.4
+MM_PER_PX = MM_PER_INCH / PX_PER_INCH
+SVG_NS = "http://www.w3.org/2000/svg"
 INKSCAPE_NS = "{http://www.inkscape.org/namespaces/inkscape}"
 LABEL_KEY = f"{INKSCAPE_NS}label"
-
-type Geometry = Line | Arc | CubicBezier
+# CSS absolute units, in px per unit (the inch factor is exact by construction).
+PX_PER_UNIT = {
+    "in": PX_PER_INCH,
+    "mm": PX_PER_INCH / MM_PER_INCH,
+    "cm": 10.0 * PX_PER_INCH / MM_PER_INCH,
+    "pt": PX_PER_INCH / 72.0,
+    "pc": PX_PER_INCH / 6.0,
+}
+# Peak radial error of one cubic Bézier fitted to a quarter circle, relative to the radius;
+# used only as the starting guess before the measured refinement in ``_arc_pieces``.
+_CUBIC_QUARTER_ERROR = 2.7e-4
+# Work limit for one elliptical arc: beyond this many cubics the tolerance is reported as unmet.
+MAX_ARC_PIECES = 4096
+_ERROR_SAMPLES = (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875)
+_LENGTH_RE = re.compile(r"^\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*([a-zA-Z%]*)\s*$")
 
 
 @dataclass(frozen=True, slots=True)
 class SvgPath:
-    """One subpath from the drawing, already in G-code units."""
+    """One subpath from the drawing, already in millimetres."""
 
-    geometry: tuple[Geometry, ...]
+    geometry: tuple[SourceGeometry, ...]
     source_id: str | None
     closed: bool
 
 
 @dataclass(frozen=True, slots=True)
 class SvgDocument:
-    """The cuttable content of an SVG file in G-code units."""
+    """The cuttable content of an SVG file in millimetres."""
 
     paths: tuple[SvgPath, ...]
     width: float
@@ -49,154 +89,308 @@ class SvgDocument:
 
 @dataclass(frozen=True, slots=True)
 class _Frame:
-    """px → G-code unit mapping, with an optional Y flip about the page height."""
+    """px → mm mapping with the Y flip, applied after the shape matrix."""
 
     scale: float
     height_px: float
     flip_y: bool
 
     def point(self, pt: se.Point) -> P:
-        x = float(pt.x) * self.scale
         y = float(pt.y)
         if self.flip_y:
             y = self.height_px - y
-        return P(x, y * self.scale)
-
-    def length(self, value: float) -> float:
-        return value * self.scale
+        return P(float(pt.x) * self.scale, y * self.scale)
 
 
-def load_svg(
+@dataclass(frozen=True, slots=True)
+class _Mapping:
+    """One shape's affine matrix followed by the page frame."""
+
+    matrix: se.Matrix
+    frame: _Frame
+
+    def point(self, pt: se.Point) -> P:
+        return self.frame.point(self.matrix.point_in_matrix_space(pt))
+
+    @property
+    def orientation(self) -> float:
+        """+1 when the mapping preserves the sense of rotation, -1 when it mirrors it."""
+        sign = 1.0 if self.matrix.determinant > 0 else -1.0
+        return -sign if self.frame.flip_y else sign
+
+    @property
+    def max_scale(self) -> float:
+        """Largest length scale factor of the mapping (operator norm)."""
+        return _singular_values(self.matrix)[0] * self.frame.scale
+
+    @property
+    def is_similarity(self) -> bool:
+        """True when the matrix is a rotation/scale, possibly mirrored (circles stay circles)."""
+        a, b, c, d = self.matrix.a, self.matrix.b, self.matrix.c, self.matrix.d
+        big, small = _singular_values(self.matrix)
+        return (
+            big > 0.0
+            and abs(big - small) <= big * 1e-9
+            and (
+                (abs(a - d) <= big * 1e-9 and abs(b + c) <= big * 1e-9)
+                or (abs(a + d) <= big * 1e-9 and abs(b - c) <= big * 1e-9)
+            )
+        )
+
+    @property
+    def uniform_scale(self) -> float:
+        """Length scale of a similarity mapping."""
+        return math.sqrt(abs(self.matrix.determinant)) * self.frame.scale
+
+
+def _singular_values(matrix: se.Matrix) -> tuple[float, float]:
+    """The linear part's singular values, largest first; the small one comes from the determinant, not by cancellation."""
+    a, b, c, d = matrix.a, matrix.b, matrix.c, matrix.d
+    total = a * a + b * b + c * c + d * d
+    det = abs(matrix.determinant)
+    root = math.sqrt(max(0.0, total * total - 4.0 * det * det))
+    big = math.sqrt(max(0.0, (total + root) / 2.0))
+    small = det / big if big > 0.0 else 0.0
+    return big, small
+
+
+def load_svg(  # noqa: PLR0913 - keyword-only loader settings
     path: Path | str,
     *,
-    unit_scale: float,
     flip_y: bool = True,
     ids: Sequence[str] = (),
     layers: Sequence[str] = (),
-    tolerance: float = 1e-9,
+    tolerance: float | None = None,
+    curve_tolerance: float = 0.01,
 ) -> SvgDocument:
-    """Read ``path`` and return its cuttable geometry.
+    """Read ``path`` and return its cuttable geometry in millimetres.
 
-    ``unit_scale`` multiplies px to give G-code units. ``ids`` keeps only
-    elements with those ids; ``layers`` keeps only elements inside a group
-    whose Inkscape label or id matches. Elements with ``display:none`` are
-    removed by the parser; ``visibility="hidden"`` ones are skipped here.
+    ``ids`` keeps elements with those ids (or clones of them); ``layers``
+    keeps elements inside a group whose Inkscape label or id matches.
+    ``tolerance`` (mm, default geom2d's ``EPSILON``) is the distance at
+    which a circular arc's radius and sweep are validated against, and if
+    need be repaired to, its endpoints. ``curve_tolerance`` (mm) bounds the
+    sampled error of converting elliptical or sheared arcs to cubics.
     """
-    try:
-        svg = se.SVG.parse(str(path), reify=True, ppi=PX_PER_INCH)
-    except FileNotFoundError as exc:
-        msg = f"SVG file not found: {path}"
-        raise SvgError(msg) from exc
-    except (ValueError, OSError) as exc:
-        msg = f"cannot parse SVG file {path}: {exc}"
-        raise SvgError(msg) from exc
-    width_px = _page_size(svg.width)
-    height_px = _page_size(svg.height)
-    if height_px is None or width_px is None:
-        msg = f"SVG file {path} has no usable width/height"
+    svg = _parse(path)
+    width_px, height_px = _number(svg.width), _number(svg.height)
+    if width_px is None or height_px is None or width_px <= 0.0 or height_px <= 0.0:
+        msg = f"SVG file {path} has no usable width/height (both attributes are required on the root element)"
         raise SvgError(msg)
-    frame = _Frame(scale=unit_scale, height_px=height_px, flip_y=flip_y)
+    frame = _Frame(scale=MM_PER_PX, height_px=height_px, flip_y=flip_y)
     wanted_ids = frozenset(ids)
     wanted_layers = frozenset(layers)
     paths: list[SvgPath] = []
-    for shape, ancestors in _shapes(svg, ()):
+    for shape, groups, clones in _shapes(svg, (), ()):
         if shape.values.get("visibility") == "hidden":
             continue
         shape_id = shape.id if isinstance(shape.id, str) else None
-        if wanted_ids and shape_id not in wanted_ids:
+        if wanted_ids and shape_id not in wanted_ids and not wanted_ids.intersection(clones):
             continue
-        if wanted_layers and not wanted_layers.intersection(ancestors):
+        if wanted_layers and not wanted_layers.intersection(groups):
             continue
-        paths.extend(_convert_shape(shape, shape_id, frame, tolerance))
-    return SvgDocument(tuple(paths), width=frame.length(width_px), height=frame.length(height_px))
+        mapping = _Mapping(shape.transform, frame)
+        if _singular_values(mapping.matrix)[1] <= 0.0:
+            msg = f"element {shape_id or '<unnamed>'} has a degenerate transform"
+            raise SvgError(msg)
+        paths.extend(_convert_shape(shape, shape_id, mapping, tolerance, curve_tolerance))
+    return SvgDocument(tuple(paths), width=width_px * MM_PER_PX, height=height_px * MM_PER_PX)
 
 
-def _page_size(value: object) -> float | None:
-    if isinstance(value, int | float):
+def _parse(path: Path | str) -> se.SVG:
+    """Parse ``path`` with the root's physical size normalised to exact px first."""
+    try:
+        root = ET.parse(path).getroot()
+    except FileNotFoundError as exc:
+        msg = f"SVG file not found: {path}"
+        raise SvgError(msg) from exc
+    except ET.ParseError as exc:
+        msg = f"{path} is not well-formed XML: {exc}"
+        raise SvgError(msg) from exc
+    except OSError as exc:
+        msg = f"cannot read SVG file {path}: {exc}"
+        raise SvgError(msg) from exc
+    if root.tag not in ("svg", f"{{{SVG_NS}}}svg"):
+        msg = f"{path} does not contain an <svg> root element"
+        raise SvgError(msg)
+    if root.get("width") is None or root.get("height") is None:
+        msg = f"SVG file {path} has no usable width/height (both attributes are required on the root element)"
+        raise SvgError(msg)
+    for name in ("width", "height"):
+        px = _length_px(root.get(name))
+        if px is not None:
+            root.set(name, repr(px))
+    try:
+        svg = se.SVG.parse(io.BytesIO(ET.tostring(root)), reify=False, ppi=PX_PER_INCH, on_error="raise")
+    except (ValueError, TypeError, IndexError, KeyError, OSError) as exc:
+        detail = str(exc) or type(exc).__name__
+        msg = f"cannot parse SVG file {path}: {detail}"
+        raise SvgError(msg) from exc
+    if not isinstance(svg, se.SVG):
+        msg = f"{path} does not contain an <svg> root element"
+        raise SvgError(msg)
+    return svg
+
+
+def _length_px(declared: object) -> float | None:
+    """A CSS length with an absolute unit in exact px; ``None`` for anything else (left to the parser)."""
+    if not isinstance(declared, str):
+        return None
+    match = _LENGTH_RE.match(declared)
+    if match is None or match.group(2) not in PX_PER_UNIT:
+        return None
+    return float(match.group(1)) * PX_PER_UNIT[match.group(2)]
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, int | float) and math.isfinite(value):
         return float(value)
     return None
 
 
-def _shapes(group: se.Group, ancestors: tuple[str, ...]) -> Iterator[tuple[se.Shape, tuple[str, ...]]]:
-    """Yield every shape with the labels and ids of the groups above it."""
-    for child in group:
+def _shapes(
+    container: se.Group | se.Use, groups: tuple[str, ...], clones: tuple[str, ...]
+) -> Iterator[tuple[se.Shape, tuple[str, ...], tuple[str, ...]]]:
+    """Yield every shape with the labels/ids of the groups above it and the ids of the clones it belongs to."""
+    for child in container:
         if isinstance(child, se.Group):
             names = tuple(name for name in (child.values.get(LABEL_KEY), child.id) if isinstance(name, str))
-            yield from _shapes(child, ancestors + names)
+            yield from _shapes(child, groups + names, clones)
+        elif isinstance(child, se.Use):
+            use_ids = (child.id,) if isinstance(child.id, str) else ()
+            yield from _shapes(child, groups, clones + use_ids)
         elif isinstance(child, se.Shape):
-            yield child, ancestors
+            yield child, groups, clones
 
 
-def _convert_shape(shape: se.Shape, source_id: str | None, frame: _Frame, tolerance: float) -> list[SvgPath]:
+def _convert_shape(
+    shape: se.Shape, source_id: str | None, mapping: _Mapping, tolerance: float | None, curve_tolerance: float
+) -> list[SvgPath]:
     paths: list[SvgPath] = []
-    geometry: list[Geometry] = []
+    geometry: list[SourceGeometry] = []
     closed = False
-
-    def flush() -> None:
-        nonlocal geometry, closed
-        if geometry:
-            paths.append(SvgPath(tuple(geometry), source_id, closed))
-        geometry = []
-        closed = False
-
-    for segment in se.Path(shape).segments():
-        match segment:
-            case se.Move():
-                flush()
-            case se.Close():
-                geometry.extend(_line(segment, frame, tolerance))
-                closed = True
-            case se.Line():
-                geometry.extend(_line(segment, frame, tolerance))
-            case se.QuadraticBezier():
-                geometry.append(
-                    CubicBezier.from_quadratic(
-                        frame.point(segment.start), frame.point(segment.control), frame.point(segment.end)
-                    )
-                )
-            case se.CubicBezier():
-                geometry.append(
-                    CubicBezier(
-                        frame.point(segment.start),
-                        frame.point(segment.control1),
-                        frame.point(segment.control2),
-                        frame.point(segment.end),
-                    )
-                )
-            case se.Arc():
-                geometry.extend(_arc(segment, frame, tolerance))
-    flush()
+    try:
+        for segment in shape.segments(transformed=False):
+            if isinstance(segment, se.Move):
+                if geometry:
+                    paths.append(SvgPath(tuple(geometry), source_id, closed))
+                geometry = []
+                closed = False
+                continue
+            geometry.extend(_convert_segment(segment, mapping, tolerance, curve_tolerance))
+            closed = closed or isinstance(segment, se.Close)
+    except (GeometryError, SvgError) as exc:
+        msg = f"element {source_id or '<unnamed>'}: {exc}"
+        raise SvgError(msg) from exc
+    if geometry:
+        paths.append(SvgPath(tuple(geometry), source_id, closed))
     return paths
 
 
-def _line(segment: se.Line | se.Close, frame: _Frame, tolerance: float) -> list[Geometry]:
-    p1, p2 = frame.point(segment.start), frame.point(segment.end)
-    if p1.distance(p2) <= tolerance:
+def _convert_segment(
+    segment: se.PathSegment, mapping: _Mapping, tolerance: float | None, curve_tolerance: float
+) -> list[SourceGeometry]:
+    match segment:
+        case se.Close() | se.Line():
+            return _line(segment, mapping)
+        case se.QuadraticBezier():
+            return [
+                CubicBezier.from_quadratic(
+                    mapping.point(segment.start), mapping.point(segment.control), mapping.point(segment.end)
+                )
+            ]
+        case se.CubicBezier():
+            return [_cubic(segment, mapping)]
+        case se.Arc():
+            return _arc(segment, mapping, tolerance, curve_tolerance)
+        case _:
+            return []
+
+
+def _line(segment: se.Line | se.Close, mapping: _Mapping) -> list[SourceGeometry]:
+    """The line, unless it is exactly empty."""
+    p1, p2 = mapping.point(segment.start), mapping.point(segment.end)
+    if p1 == p2:
         return []
     return [Line(p1, p2)]
 
 
-def _arc(segment: se.Arc, frame: _Frame, tolerance: float) -> list[Geometry]:
-    rx, ry = float(segment.rx), float(segment.ry)
-    if abs(rx - ry) > tolerance:
-        return [
-            CubicBezier(
-                frame.point(cubic.start),
-                frame.point(cubic.control1),
-                frame.point(cubic.control2),
-                frame.point(cubic.end),
+def _cubic(segment: se.CubicBezier, mapping: _Mapping) -> CubicBezier:
+    return CubicBezier(
+        mapping.point(segment.start),
+        mapping.point(segment.control1),
+        mapping.point(segment.control2),
+        mapping.point(segment.end),
+    )
+
+
+def _arc(segment: se.Arc, mapping: _Mapping, tolerance: float | None, curve_tolerance: float) -> list[SourceGeometry]:
+    rx, ry = abs(float(segment.rx)), abs(float(segment.ry))
+    p1, p2 = mapping.point(segment.start), mapping.point(segment.end)
+    if rx == 0.0 or ry == 0.0:
+        # SVG: a zero radius makes the arc a straight line, and identical endpoints make it nothing
+        # (the parser reports both with zero radii).
+        return [] if p1 == p2 else [Line(p1, p2)]
+    if mapping.is_similarity and abs(rx - ry) <= max(rx, ry) * 1e-9:
+        radius = rx * mapping.uniform_scale
+        angle = float(segment.sweep) * mapping.orientation
+        return [_circular_arc(segment, mapping, p1=p1, p2=p2, radius=radius, angle=angle, tolerance=tolerance)]
+    pieces = _arc_pieces(segment, rx, ry, curve_tolerance / mapping.max_scale)
+    return [_cubic(cubic, mapping) for cubic in segment.as_cubic_curves(arc_required=pieces)]
+
+
+def _circular_arc(  # noqa: PLR0913 - one keyword per arc datum
+    segment: se.Arc, mapping: _Mapping, *, p1: P, p2: P, radius: float, angle: float, tolerance: float | None
+) -> Arc:
+    """A geom2d arc from the exact mapped endpoints, validated (and if need be repaired) at ``tolerance``.
+
+    When the endpoints coincide at geom2d's floor the sweep is a full turn
+    (or nothing); the centre is then the parser's, mapped, and the end is
+    placed on the circle by the sweep.
+    """
+    if not p1.almost_equal(p2):
+        return Arc.from_sweep(p1, p2, radius, angle, tolerance=tolerance)
+    center = mapping.point(segment.center)
+    end = center + (p1 - center).rotate(angle)
+    return Arc(p1, end, radius, angle, center)
+
+
+def _arc_pieces(segment: se.Arc, rx: float, ry: float, local_tolerance: float) -> int:
+    """Smallest cubic count (in the arc's own frame) whose sampled error estimate stays within ``local_tolerance``.
+
+    Raises ``SvgError`` when ``MAX_ARC_PIECES`` cubics are not enough; a
+    count is never returned unverified.
+    """
+    sweep = abs(float(segment.sweep))
+    radius = max(rx, ry)
+    guess = (math.pi / 2.0) * (local_tolerance / (_CUBIC_QUARTER_ERROR * radius)) ** (1.0 / 6.0)
+    pieces = min(MAX_ARC_PIECES, max(1, math.ceil(sweep / max(guess, 1e-6))))
+    rotation = float(segment.get_rotation())
+    center = segment.center
+    while True:
+        if _ellipse_error(segment.as_cubic_curves(arc_required=pieces), center, rx, ry, rotation) <= local_tolerance:
+            return pieces
+        if pieces >= MAX_ARC_PIECES:
+            msg = (
+                f"elliptical arc (radii {rx:g} x {ry:g}) cannot be approximated within the curve tolerance "
+                f"with {MAX_ARC_PIECES} cubics"
             )
-            for cubic in segment.as_cubic_curves()
-        ]
-    p1, p2 = frame.point(segment.start), frame.point(segment.end)
-    if p1.distance(p2) <= tolerance:
-        return []
-    radius = frame.length(rx)
-    sweep = float(segment.sweep)
-    # A mirrored frame flips the sense of the sweep, and a semicircle has the
-    # same centre either way, so choose the sign whose midpoint matches.
-    midpoint = frame.point(segment.point(0.5))
-    arc = Arc.from_sweep(p1, p2, radius, sweep)
-    if not arc.point_at(0.5).almost_equal(midpoint, max(tolerance, radius * 1e-6)):
-        arc = Arc.from_sweep(p1, p2, radius, -sweep)
-    return [arc]
+            raise SvgError(msg)
+        pieces = min(MAX_ARC_PIECES, pieces * 2)
+
+
+def _ellipse_error(cubics: Iterator[se.CubicBezier], center: se.Point, rx: float, ry: float, rotation: float) -> float:
+    """Largest sampled first-order distance estimate from the cubics to the ellipse they approximate."""
+    cos_r, sin_r = math.cos(-rotation), math.sin(-rotation)
+    worst = 0.0
+    for cubic in cubics:
+        for t in _ERROR_SAMPLES:
+            p = cubic.point(t)
+            dx, dy = float(p.x) - float(center.x), float(p.y) - float(center.y)
+            x, y = dx * cos_r - dy * sin_r, dx * sin_r + dy * cos_r
+            u, v = x / rx, y / ry
+            f = u * u + v * v - 1.0
+            grad = math.hypot(2.0 * u / rx, 2.0 * v / ry)
+            if grad > 0.0:
+                worst = max(worst, abs(f) / grad)
+    return worst

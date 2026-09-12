@@ -5,20 +5,43 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# The geom2d checkout lives beside this one inside the workspace (see ci.yml).
 jobs:
   build:
-    name: Build distribution
+    name: Check and build distribution
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: utl-tcnc
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: utl-tcnc
+      - uses: actions/checkout@v4
+        with:
+          repository: Cabalist/utl-geom2d
+          ref: ${{ vars.GEOM2D_REF || 'main' }}
+          path: utl-geom2d
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.14"
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff format --check src tests stubs
+      - run: uv run ruff check src tests stubs
+      - run: uv run ty check
+      - run: uv run pyrefly check
+      - run: uv run pytest
       - run: uv build
+      - name: Install the built wheel into a clean environment and run it
+        run: |
+          uv venv --python 3.14 /tmp/wheel-venv
+          uv pip install --python /tmp/wheel-venv/bin/python dist/*.whl ../utl-geom2d
+          /tmp/wheel-venv/bin/tcnc tests/files/square.svg -o /tmp/square.ngc --overcut 1
+          grep -q '^M2' /tmp/square.ngc
       - uses: actions/upload-artifact@v4
         with:
           name: python-package-distributions
-          path: dist/
+          path: utl-tcnc/dist/
 
   publish-to-testpypi:
     name: Publish to TestPyPI (manual)

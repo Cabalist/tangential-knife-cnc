@@ -5,19 +5,37 @@ on:
     branches: [main]
   pull_request:
 
+# Both repositories are checked out inside the workspace as siblings, so the
+# `../utl-geom2d` path source in pyproject.toml resolves on a clean runner.
+# Pin GEOM2D_REF (a repository variable) to a pushed revision when one exists.
 jobs:
   check:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: utl-tcnc
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: utl-tcnc
+      - uses: actions/checkout@v4
+        with:
+          repository: Cabalist/utl-geom2d
+          ref: ${{ vars.GEOM2D_REF || 'main' }}
+          path: utl-geom2d
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.14"
-      # NOTE: [tool.uv.sources] points utl-geom2d at a sibling path until
-      # geom2d tags v1.0.0; until then this job cannot resolve dependencies.
-      - run: uv sync --all-groups
-      - run: uv run ruff format --check src tests
-      - run: uv run ruff check src tests
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff format --check src tests stubs
+      - run: uv run ruff check src tests stubs
       - run: uv run ty check
       - run: uv run pyrefly check
       - run: uv run pytest
+      - run: uv build
+      - name: Install the built wheel into a clean environment and run it
+        run: |
+          uv venv --python 3.14 /tmp/wheel-venv
+          uv pip install --python /tmp/wheel-venv/bin/python dist/*.whl ../utl-geom2d
+          /tmp/wheel-venv/bin/tcnc tests/files/square.svg -o /tmp/square.ngc --overcut 1
+          grep -q '^M2' /tmp/square.ngc

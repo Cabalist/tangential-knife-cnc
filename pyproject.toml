@@ -88,19 +88,22 @@ select = [
     "T20",
     "ISC",
     "TC",
+    "FBT",    # booleans are keyword-only by convention
+    "C90",    # mccabe complexity
+    "SLF",    # private member access
+    "ERA",    # commented-out code
+    "LOG",    # logging misuse
+    "ICN",    # import conventions
+    "INP",    # implicit namespace packages
+    "SLOT",   # __slots__ on str/tuple/namedtuple subclasses
+    "N",      # pep8 naming
 ]
 ignore = [
     "E501",    # line too long (handled by formatter)
-    "PERF401",
-    "PERF403",
-    "PLR0912",
-    "PLR0913",
-    "PLR0915",
-    "PLR0917", # established APIs and callback/fixture signatures accept positional arguments
     "PLR2004",
     "TRY003",
 ]
-per-file-ignores = { "tests/**" = ["ANN", "PLR2004", "ARG001"], "stubs/**" = ["ANN401", "I001"] }
+per-file-ignores = { "tests/**" = ["PLR2004", "ARG001"], "tests/test_cli.py" = ["SLF001"], "stubs/**" = ["ANN401", "I001"] }
 
 [tool.ruff.lint.isort]
 known-first-party = ["tcnc"]
@@ -128,10 +131,6 @@ redundant-cast = "error"
 unused-ignore-comment = "error"
 unused-type-ignore-comment = "error"
 
-[[tool.ty.overrides]]
-include = ["tests/**"]
-rules = { unresolved-attribute = "ignore" }
-
 [tool.pyrefly]
 min-severity = "warn"
 project-includes = ["src", "tests"]
@@ -141,17 +140,3 @@ preset = "strict"
 
 [tool.pyrefly.errors]
 redundant-cast = "error"
-# Every hit is a `key=lambda` passed to sorted/min/max over a typed
-# iterable. Pyrefly 1.2 does not solve the lambda's parameter from the
-# sibling iterable argument, so it reports the idiom itself; ty infers and
-# checks the same lambdas. Re-enable once pyrefly solves generic key callables.
-implicit-any-lambda = "ignore"
-
-[[tool.pyrefly.sub-config]]
-matches = "tests/**/*"
-
-[tool.pyrefly.sub-config.errors]
-implicit-any-empty-container = "ignore"
-implicit-any-parameter = "ignore"
-implicit-any-type-argument = "ignore"
-missing-attribute = "ignore"

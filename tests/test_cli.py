@@ -1,20 +1,32 @@
 """Command line end to end."""
 
+from dataclasses import fields
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
-from tcnc.cli import EXIT_OK, EXIT_PLAN, EXIT_SVG, EXIT_USAGE, build_parser, main
+from tcnc.cli import EXIT_OK, EXIT_PLAN, EXIT_SVG, EXIT_USAGE, build_parser, main, options_from_namespace, run
+from tcnc.errors import OptionError
 from tcnc.options import KnifeOptions
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_parser_defaults_match_options() -> None:
     ns = build_parser().parse_args(["in.svg"])
-    opts = KnifeOptions.from_namespace(ns)
-    assert opts == KnifeOptions()
+    assert options_from_namespace(ns) == KnifeOptions()
+    ns = build_parser().parse_args(["in.svg", "--corner-angle", "30", "--id", "a", "--id", "b"])
+    opts = options_from_namespace(ns)
+    assert opts.corner_angle == pytest.approx(0.5235987755982988)
+    assert opts.ids == ("a", "b")
+    # Every option field is set by the parser and nothing else pretends to be one.
+    dests = {action.dest for action in build_parser()._actions}
+    assert {field.name for field in fields(KnifeOptions)} <= dests
 
 
-def test_square_end_to_end(fixture, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_square_end_to_end(fixture: Callable[[str], Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = tmp_path / "square.ngc"
     preview = tmp_path / "square-preview.svg"
     code = main(
@@ -34,21 +46,21 @@ def test_square_end_to_end(fixture, tmp_path: Path, capsys: pytest.CaptureFixtur
     text = out.read_text()
     assert text.startswith("%\n")
     assert "M2" in text
-    assert text.count("G1 Z-0.2500") == 4
+    assert text.count("G1 Z-1.000") == 4
     assert preview.read_text().startswith("<svg ")
     captured = capsys.readouterr()
     assert "4 cuts" in captured.out
     assert not list(tmp_path.glob(".*.tmp"))
 
 
-def test_default_output_name(fixture, tmp_path: Path) -> None:
+def test_default_output_name(fixture: Callable[[str], Path], tmp_path: Path) -> None:
     src = tmp_path / "copy.svg"
     src.write_bytes(fixture("circle.svg").read_bytes())
     assert main([str(src)]) == EXIT_OK
     assert (tmp_path / "copy.ngc").exists()
 
 
-def test_error_exit_codes(fixture, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_error_exit_codes(fixture: Callable[[str], Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = str(tmp_path / "x.ngc")
     assert main([str(tmp_path / "missing.svg"), "-o", out]) == EXIT_SVG
     assert "not found" in capsys.readouterr().err
@@ -57,16 +69,49 @@ def test_error_exit_codes(fixture, tmp_path: Path, capsys: pytest.CaptureFixture
     assert main([str(fixture("square.svg")), "-o", out, "--tolerance", "0"]) == EXIT_USAGE
     assert "tolerance" in capsys.readouterr().err
     with pytest.raises(SystemExit) as info:
-        main([str(fixture("square.svg")), "--gcode-units", "furlongs"])
+        main([str(fixture("square.svg")), "--blend-mode", "furlongs"])
     assert info.value.code == EXIT_USAGE
     assert not Path(out).exists()
 
 
-def test_plan_error_exit_code(fixture, tmp_path: Path) -> None:
-    # z_safe below z_depth is an option error; a geometry failure is a plan error. Both are reported, not raised.
-    out = str(tmp_path / "x.ngc")
-    assert main([str(fixture("square.svg")), "-o", out, "--z-safe", "-1"]) == EXIT_USAGE
-    assert EXIT_PLAN == 3
+def test_output_write_error_uses_documented_exit_code(
+    fixture: Callable[[str], Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([str(fixture("square.svg")), "-o", str(tmp_path / "absent" / "out.ngc")]) == EXIT_PLAN
+    assert "cannot write output" in capsys.readouterr().err
+    assert main([str(fixture("square.svg")), "-o", str(tmp_path / "x.ngc"), "--z-safe", "-1"]) == EXIT_USAGE
+
+
+def test_failed_preview_leaves_the_previous_program_in_place(
+    fixture: Callable[[str], Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "out.ngc"
+    output.write_text("OLD PROGRAM")
+    preview = tmp_path / "preview-dir"
+    preview.mkdir()
+    assert main([str(fixture("square.svg")), "-o", str(output), "--preview", str(preview)]) == EXIT_PLAN
+    assert "is a directory" in capsys.readouterr().err
+    assert output.read_text() == "OLD PROGRAM"
+    assert not list(tmp_path.glob(".*"))
+
+
+def test_runs_of_short_links_are_cut_not_rejected(tmp_path: Path) -> None:
+    for data in (
+        "M0 0 L96 0 L96.00001 0 L96.00002 0 L96.00003 0 L192 0",
+        "M0 0 L96 0 L96 96 L0 0.00001 L0 0.00002 Z",
+    ):
+        path = tmp_path / "links.svg"
+        path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="384" height="384"><path d="{data}"/></svg>')
+        assert main([str(path), "-o", str(tmp_path / "links.ngc")]) == EXIT_OK
+
+
+def test_output_and_preview_must_be_distinct(fixture: Callable[[str], Path], tmp_path: Path) -> None:
+    output = tmp_path / "out.ngc"
+    with pytest.raises(OptionError):
+        run(KnifeOptions(), fixture("square.svg"), output, output)
+    with pytest.raises(OptionError):
+        run(KnifeOptions(), fixture("square.svg"), fixture("square.svg"))
+    assert not output.exists()
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:

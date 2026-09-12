@@ -6,7 +6,7 @@ whole family with one clause; the subclasses say which stage failed.
 
 
 class TcncError(ValueError):
-    """Base class for every error tcnc raises on bad input or bad geometry."""
+    """Base class for every error tcnc raises on bad input, bad geometry or bad output."""
 
 
 class OptionError(TcncError):
@@ -19,3 +19,7 @@ class SvgError(TcncError):
 
 class PlanError(TcncError):
     """The toolpaths cannot be turned into a cut plan or G-code."""
+
+
+class OutputError(TcncError):
+    """The G-code or preview file could not be written."""

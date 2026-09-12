@@ -13,6 +13,7 @@ from .svgelements import (
     Group as Group,
     Line as Line,
     Linear as Linear,
+    Matrix as Matrix,
     Move as Move,
     Path as Path,
     PathSegment as PathSegment,
@@ -24,6 +25,8 @@ from .svgelements import (
     Shape as Shape,
     SimpleLine as SimpleLine,
     SVGElement as SVGElement,
+    Transformable as Transformable,
+    Use as Use,
 )
 
 name: str

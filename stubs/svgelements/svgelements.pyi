@@ -1,6 +1,6 @@
 # Minimal typing surface of svgelements 1.9 for tcnc (see __init__.pyi).
 from collections.abc import Iterator
-from typing import Any
+from typing import IO, Any
 
 DEFAULT_PPI: float
 
@@ -9,16 +9,32 @@ class Point:
     y: float
     def __init__(self, x: float = ..., y: float = ...) -> None: ...
 
+class Matrix:
+    a: float
+    b: float
+    c: float
+    d: float
+    e: float
+    f: float
+    def __init__(self, *components: object) -> None: ...
+    @property
+    def determinant(self) -> float: ...
+    def point_in_matrix_space(self, point: Point) -> Point: ...
+
 class SVGElement:
     values: dict[str, Any]
     @property
     def id(self) -> str | None: ...
 
-class Shape(SVGElement):
+class Transformable:
+    transform: Matrix
+
+class Shape(SVGElement, Transformable):
     def segments(self, transformed: bool = ...) -> list[PathSegment]: ...
 
 class Path(Shape):
     def __init__(self, *args: object, **kwargs: object) -> None: ...
+    def bbox(self) -> tuple[float, float, float, float]: ...
 
 class Rect(Shape): ...
 class Circle(Shape): ...
@@ -27,7 +43,11 @@ class Polyline(Shape): ...
 class Polygon(Shape): ...
 class SimpleLine(Shape): ...
 
-class Group(SVGElement):
+class Group(SVGElement, Transformable):
+    def __iter__(self) -> Iterator[SVGElement]: ...
+    def __len__(self) -> int: ...
+
+class Use(SVGElement, Transformable):
     def __iter__(self) -> Iterator[SVGElement]: ...
     def __len__(self) -> int: ...
 
@@ -38,7 +58,7 @@ class SVG(Group):
     @classmethod
     def parse(
         cls,
-        source: str,
+        source: str | IO[bytes],
         reify: bool = ...,
         ppi: float = ...,
         width: float | None = ...,
@@ -47,6 +67,7 @@ class SVG(Group):
         transform: str | None = ...,
         context: Any = ...,
         parse_display_none: bool = ...,
+        on_error: str = ...,
     ) -> SVG: ...
     def elements(self, conditional: Any = ...) -> Iterator[SVGElement]: ...
 
@@ -78,4 +99,5 @@ class Arc(Curve):
     ry: float
     center: Point
     sweep: float
+    def get_rotation(self) -> float: ...
     def as_cubic_curves(self, arc_required: int | None = ...) -> Iterator[CubicBezier]: ...
