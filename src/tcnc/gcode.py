@@ -203,11 +203,11 @@ class GCodeWriter:
         Validation happens on the rounded words the controller will read:
         the radii at both ends must agree within LinuxCNC's tolerance and the
         directed sweep those words describe must match the nominal one. An
-        arc that cannot be expressed at this precision (its end or centre
-        rounds onto its start, or the rounded endpoints would send the
-        controller the long way round) is written as a straight move when
-        its chord is within the output resolution of the arc; otherwise it
-        is an error.
+        arc that cannot be expressed at this precision (its end rounds onto
+        its start, an end rounds onto the centre, or the rounded endpoints
+        would send the controller the long way round) is written as a
+        straight move when its chord is within the output resolution of the
+        arc; otherwise it is an error.
         """
         if self.state.x is None or self.state.y is None:
             msg = "an arc needs a known XY start position"
@@ -218,27 +218,31 @@ class GCodeWriter:
         end_rounded = P(round(end.x, precision), round(end.y, precision))
         offset = center - start
         i, j = round(offset.x, precision), round(offset.y, precision)
-        if sweep == 0.0 or end_rounded == start or (i == 0.0 and j == 0.0):
-            self._motion(Move(FEED, x=end.x, y=end.y, a=a, feed=feed, comment=comment))
-            return
         centre_rounded = P(start.x + i, start.y + j)
         start_radius = start.distance(centre_rounded)
         end_radius = end_rounded.distance(centre_rounded)
-        if abs(start_radius - end_radius) > RADIUS_TOLERANCE:
+        problem: str | None = None
+        if sweep == 0.0 or end_rounded == start:
+            problem = "its end rounds onto its start"
+        elif start_radius == 0.0 or end_radius == 0.0:
+            problem = "an end rounds onto its centre"
+        elif abs(start_radius - end_radius) > RADIUS_TOLERANCE:
             msg = (
                 f"arc end point is off the circle at {precision} decimals: "
                 f"start radius {start_radius:g}, end radius {end_radius:g}"
             )
             raise PlanError(msg)
-        written = _written_sweep(start, end_rounded, centre_rounded, clockwise=sweep < 0.0)
-        budget = _SWEEP_BUDGET_RESOLUTIONS * resolution / min(start_radius, end_radius)
-        if abs(written - abs(sweep)) > budget:
+        else:
+            written = _written_sweep(start, end_rounded, centre_rounded, clockwise=sweep < 0.0)
+            budget = _SWEEP_BUDGET_RESOLUTIONS * resolution / min(start_radius, end_radius)
+            if abs(written - abs(sweep)) > budget:
+                problem = f"its sweep would be {math.degrees(written):.4f}° instead of {math.degrees(abs(sweep)):.4f}°"
+        if problem is not None:
+            # Every unrepresentable arc takes the same exit: a straight move when the arc never leaves
+            # the output resolution around its chord, otherwise an error.
             sagitta = end.distance(center) * (1.0 - math.cos(sweep / 2.0))
             if sagitta > resolution:
-                msg = (
-                    f"arc sweep changes after rounding to {precision} decimals: "
-                    f"{math.degrees(abs(sweep)):.4f}° nominal, {math.degrees(written):.4f}° as written"
-                )
+                msg = f"arc cannot be written at {precision} decimals: {problem}"
                 raise PlanError(msg)
             self._motion(Move(FEED, x=end.x, y=end.y, a=a, feed=feed, comment=comment))
             return

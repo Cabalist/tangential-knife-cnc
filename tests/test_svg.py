@@ -167,6 +167,14 @@ def test_rotated_circle_stays_circular_and_skewed_arc_stays_on_the_artwork(tmp_p
         assert original.length == pytest.approx(20 * MM_PER_PX, abs=1e-6)
 
 
+@pytest.mark.parametrize("angle", [0, 6, 10, 18, 30, 45, 90])
+def test_rotated_circles_stay_circular(tmp_path: Path, angle: int) -> None:
+    body = f'<circle transform="rotate({angle} 192 192)" cx="192" cy="192" r="96"/>'
+    (path,) = load_svg(drawing(tmp_path, body, size='width="384" height="384"')).paths
+    assert all(isinstance(g, Arc) for g in path.geometry), [type(g).__name__ for g in path.geometry]
+    assert all(isinstance(g, Arc) and g.radius == pytest.approx(96 * MM_PER_PX) for g in path.geometry)
+
+
 def test_arcs_pass_exactly_through_their_mapped_endpoints(tmp_path: Path) -> None:
     # The chord is longer than the diameter: SVG grows the radius; the arc is built from the exact endpoints.
     path = drawing(tmp_path, '<path d="M0 0 A10 10 0 0 1 20.02 0"/>')

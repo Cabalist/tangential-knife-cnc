@@ -113,6 +113,20 @@ def test_rounded_endpoints_on_one_ray_do_not_become_a_full_turn() -> None:
     assert all(sweep <= math.pi / 2 + 1e-9 for sweep in written_sweeps(text))
 
 
+def test_arc_end_rounding_onto_the_centre_is_a_straight_move() -> None:
+    radius = 0.00051001
+    w = writer(QUIET)
+    w.rapid(x=P.from_polar(radius, 0.1).x, y=P.from_polar(radius, 0.1).y)
+    assert w.lines[-1] == "G0 X0.001 Y0.000"
+    w.arc(end=P.from_polar(radius, 0.4), center=P(0, 0), sweep=0.3, a=0.3)
+    assert w.lines[-1] == "G1 X0.000 A17.189 F250.000"
+    # An arc that leaves the resolution around its chord cannot be written when its ends collapse: an error.
+    big = writer(KnifeOptions(gcode_comments=False, output_precision=0))
+    big.rapid(x=1.0, y=0.0)
+    with pytest.raises(PlanError, match="cannot be written"):
+        big.arc(end=P.from_polar(1.0, math.radians(350)), center=P(0, 0), sweep=math.radians(350))
+
+
 def test_written_sweeps_match_the_plan_for_real_arcs() -> None:
     opts = KnifeOptions(overcut=0.5, blade_offset=0.3, gcode_comments=False)
     text = write_program(plan_job([circle(), square()], opts), now=lambda: FIXED_NOW)

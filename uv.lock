@@ -167,6 +167,52 @@ wheels = [
 ]
 
 [[package]]
+name = "tangential-knife-cnc"
+version = "1.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "svgelements" },
+    { name = "tangential-knife-cnc-geometry" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "prek" },
+    { name = "pyrefly" },
+    { name = "pytest" },
+    { name = "pytest-randomly" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "svgelements", specifier = ">=1.9" },
+    { name = "tangential-knife-cnc-geometry", specifier = ">=1.0.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "prek" },
+    { name = "pyrefly" },
+    { name = "pytest" },
+    { name = "pytest-randomly" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[[package]]
+name = "tangential-knife-cnc-geometry"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/da/6d175b7d0efd487f4c60b247a0b52c2d272f3a7f389cfea9859e2777ce2f/tangential_knife_cnc_geometry-1.0.0.tar.gz", hash = "sha256:43576ff5e39008b55f66d351b1123d3464f0e7af32e4ffce66d23f22539261ff", size = 71095, upload-time = "2026-09-12T22:06:12.885Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2d/98/324e0c2097d0f4a23f6007d4cb59f33bff3908dba74fa6077df6994154b8/tangential_knife_cnc_geometry-1.0.0-py3-none-any.whl", hash = "sha256:df2f241d4e982c8c206174ed7874a18e5d51836968540a898c07d4a165475e45", size = 43666, upload-time = "2026-09-12T22:06:11.639Z" },
+]
+
+[[package]]
 name = "ty"
 version = "0.0.80"
 source = { registry = "https://pypi.org/simple" }
@@ -189,64 +235,4 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c4/f6/c286d5e1b560cfd16d6e91fdab683718aacf09fc88938ca06dcc9d1c8502/ty-0.0.80-py3-none-win32.whl", hash = "sha256:a81b3b512f7b4c68e42fbd1835633de658809666e9aafd5defa52bbc5197698d", size = 12881806, upload-time = "2026-09-09T21:18:41.507Z" },
     { url = "https://files.pythonhosted.org/packages/fd/c8/3b3a8ac16d47a23ff34bf57c0d99a491860748aea96e0e886b4bfed54f9b/ty-0.0.80-py3-none-win_amd64.whl", hash = "sha256:8043f99878a2ae434781cb881c8a3840dff70c4a5b60bdc5ae84251f35ee063f", size = 13528883, upload-time = "2026-09-09T21:18:43.687Z" },
     { url = "https://files.pythonhosted.org/packages/2e/71/a6c697930fca76596d7d17f8853120f41a298fd9ea632c901cfca8ca869b/ty-0.0.80-py3-none-win_arm64.whl", hash = "sha256:e277ef034331da5319efc839c064968d24f35715b71c70369cf97d36fe4dcbdb", size = 13370135, upload-time = "2026-09-09T21:18:45.758Z" },
-]
-
-[[package]]
-name = "utl-geom2d"
-version = "1.0.0"
-source = { editable = "../utl-geom2d" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "prek" },
-    { name = "pyrefly" },
-    { name = "pytest" },
-    { name = "pytest-randomly" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-docs = [
-    { name = "furo" },
-    { name = "sphinx" },
-    { name = "sphinx-autobuild" },
-]
-
-[[package]]
-name = "utl-tcnc"
-version = "1.0.0"
-source = { editable = "." }
-dependencies = [
-    { name = "svgelements" },
-    { name = "utl-geom2d" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "prek" },
-    { name = "pyrefly" },
-    { name = "pytest" },
-    { name = "pytest-randomly" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "svgelements", specifier = ">=1.9" },
-    { name = "utl-geom2d", editable = "../utl-geom2d" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "prek" },
-    { name = "pyrefly" },
-    { name = "pytest" },
-    { name = "pytest-randomly" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "ty" },
 ]

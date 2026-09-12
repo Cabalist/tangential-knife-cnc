@@ -54,15 +54,83 @@ def test_publish_restores_the_previous_files_when_a_later_step_fails(
     assert calls  # the first file had already been replaced and was rolled back
 
 
-def test_publish_write_failure_removes_the_temporary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_publish_write_failure_removes_the_temporary_and_closes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import os  # noqa: PLC0415 - only this test patches the low-level write
+    import tempfile  # noqa: PLC0415
+
+    descriptors: list[int] = []
+    original_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(
+        *, suffix: str | None = None, prefix: str | None = None, dir: Path | None = None, text: bool = False
+    ) -> tuple[int, str]:
+        descriptor, name = original_mkstemp(suffix=suffix, prefix=prefix, dir=dir, text=text)
+        descriptors.append(descriptor)
+        return descriptor, name
 
     def failing_fdopen(*args: object, **kwargs: object) -> object:
         msg = "no space"
         raise OSError(msg)
 
+    monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
     monkeypatch.setattr(os, "fdopen", failing_fdopen)
     with pytest.raises(OutputError, match="no space"):
         publish([(tmp_path / "a.ngc", "x")])
     monkeypatch.undo()
     assert list(tmp_path.iterdir()) == []
+    (descriptor,) = descriptors
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(descriptor)
+
+
+def test_publish_restores_a_dangling_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    program, preview = tmp_path / "a.ngc", tmp_path / "a.svg"
+    program.symlink_to("not-created-yet.ngc")
+    preview.write_text("OLD PREVIEW")
+    original = Path.replace
+
+    def failing_replace(self: Path, target: Path) -> Path:
+        if self.suffix == ".tmp" and target.name == "a.svg":
+            msg = "simulated preview publish failure"
+            raise OSError(msg)
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+    with pytest.raises(OutputError, match="simulated"):
+        publish([(program, "NEW PROGRAM"), (preview, "NEW PREVIEW")])
+    monkeypatch.undo()
+    assert program.is_symlink()
+    assert program.readlink() == Path("not-created-yet.ngc")
+    assert preview.read_text() == "OLD PREVIEW"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.ngc", "a.svg"]
+
+
+def test_publish_reports_a_failed_restoration_and_keeps_the_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    program, preview = tmp_path / "a.ngc", tmp_path / "a.svg"
+    program.write_text("old a")
+    preview.write_text("old b")
+    original = Path.replace
+
+    def failing_replace(self: Path, target: Path) -> Path:
+        if target.name == "a.svg" and self.suffix == ".tmp":
+            msg = "disk full"
+            raise OSError(msg)
+        if target.name == "a.ngc" and self.suffix == ".bak":
+            msg = "cannot restore"
+            raise OSError(msg)
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+    with pytest.raises(
+        OutputError, match=r"disk full; restoring .*a\.ngc failed .*previous content is kept at"
+    ) as info:
+        publish([(program, "new a"), (preview, "new b")])
+    monkeypatch.undo()
+    backup = next(p for p in tmp_path.iterdir() if p.suffix == ".bak")
+    assert str(backup) in str(info.value)
+    assert backup.read_text() == "old a"
+    assert preview.read_text() == "old b"

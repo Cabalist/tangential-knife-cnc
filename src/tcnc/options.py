@@ -12,8 +12,9 @@ geom2d's own numerical floor (``const.EPSILON``).
 Machine contract encoded here: the material surface is Z = 0, cutting
 depths are below it, and ``z_safe`` clears the surface and every pass. The
 machine reads words rounded to ``output_precision`` decimals, so the
-heights, steps and feeds are validated on their rounded values, and the
-number of passes is bounded (``MAX_PASSES``).
+heights, steps and feeds are validated on their rounded values, passes are
+planned on the grid of representable depths so that no written increment
+exceeds ``z_step``, and the number of passes is bounded (``MAX_PASSES``).
 """
 
 import math
@@ -30,7 +31,11 @@ type SortMethod = Literal["none", "nearest"]
 
 ANGLE_FIELDS = frozenset({"corner_angle", "a_offset"})
 MAX_PASSES = 1000
+MAX_OUTPUT_PRECISION = 9
 _PASS_SLACK = 1e-9
+# Grid cells beyond which a float no longer counts them exactly: a step that coarse never subdivides a
+# schedulable depth, and a depth that deep cannot be scheduled.
+_MAX_GRID_UNITS = 2**53
 
 
 def _require(*, condition: bool, message: str) -> None:
@@ -103,8 +108,8 @@ class KnifeOptions:
             condition=self.biarc_max_depth >= 0, message=f"biarc_max_depth must be >= 0, got {self.biarc_max_depth!r}"
         )
         _require(
-            condition=0 <= self.output_precision <= 9,
-            message=f"output_precision must be 0..9, got {self.output_precision!r}",
+            condition=0 <= self.output_precision <= MAX_OUTPUT_PRECISION,
+            message=f"output_precision must be 0..{MAX_OUTPUT_PRECISION}, got {self.output_precision!r}",
         )
         for name in ("xy_feed", "z_feed", "a_feed"):
             value = getattr(self, name)
@@ -162,8 +167,16 @@ class KnifeOptions:
             message=f"z_depth {self.z_depth!r} rounds to Z0 at {places} decimals; it must be at most -{resolution:g}",
         )
         _require(
-            condition=self.z_step == 0.0 or round(self.z_step, places) > 0.0,
-            message=f"z_step {self.z_step!r} rounds to zero at {places} decimals; use 0 for a single pass",
+            condition=self.z_step == 0.0 or self._step_units > 0,
+            message=(
+                f"z_step {self.z_step!r} is below the output resolution {resolution:g} at {places} decimals, "
+                "so no pass could be written within it; use 0 for a single pass"
+            ),
+        )
+        depth_units = -round(self.z_depth, places) / resolution
+        _require(
+            condition=math.isfinite(depth_units) and depth_units < _MAX_GRID_UNITS,
+            message=f"z_depth {self.z_depth!r} is too deep to schedule at {places} decimals",
         )
         for name in ("xy_feed", "z_feed", "a_feed"):
             value = getattr(self, name)
@@ -176,31 +189,45 @@ class KnifeOptions:
             message=f"blend_tolerance {self.blend_tolerance!r} rounds to zero at {places} decimals",
         )
         if self.z_step > 0.0:
-            count = self._nominal_pass_count()
+            count = self._scheduled_passes
             _require(
                 condition=count <= MAX_PASSES,
                 message=f"z_depth {self.z_depth!r} at z_step {self.z_step!r} needs {count} passes; at most {MAX_PASSES}",
             )
 
-    def _nominal_pass_count(self) -> int:
-        """Passes of ``z_step`` needed to reach ``z_depth`` (float noise forgiven); the step is known to be positive."""
-        return max(1, math.ceil(-self.z_depth / self.z_step - _PASS_SLACK))
+    @property
+    def _step_units(self) -> int:
+        """``z_step`` in output grid cells, rounded down (0 below the resolution; capped when a float cannot count)."""
+        units = self.z_step / self.output_resolution
+        if not math.isfinite(units) or units >= _MAX_GRID_UNITS:
+            return _MAX_GRID_UNITS
+        return math.floor(units + _PASS_SLACK)
+
+    @property
+    def _depth_units(self) -> int:
+        """The final depth's written word in output grid cells (positive); validated finite in ``_check_rounded``."""
+        return round(-round(self.z_depth, self.output_precision) / self.output_resolution)
+
+    @property
+    def _scheduled_passes(self) -> int:
+        """Passes on the grid: the step is known to be positive."""
+        return max(1, -(-self._depth_units // self._step_units))
 
     @property
     def pass_depths(self) -> tuple[float, ...]:
         """Z depths of the successive passes, ending exactly at ``z_depth``.
 
-        Every increment is at most ``z_step``. A penultimate pass that
-        rounds to the same word as the final depth is left out, so no pass
-        is written twice.
+        The intermediate passes lie on the grid of depths the output can
+        represent, spaced by the largest representable step not above
+        ``z_step`` and counted in whole grid cells, so every increment the
+        machine sees is at most ``z_step``, no depth is written twice, and
+        the schedule agrees exactly with the pass limit check.
         """
         if self.z_step <= 0.0:
             return (self.z_depth,)
-        count = self._nominal_pass_count()
-        depths = [-(index + 1) * self.z_step for index in range(count - 1)]
-        places = self.output_precision
-        if depths and round(depths[-1], places) == round(self.z_depth, places):
-            depths.pop()
+        resolution, places = self.output_resolution, self.output_precision
+        step_units = self._step_units
+        depths = [round(-index * step_units * resolution, places) for index in range(1, self._scheduled_passes)]
         return (*depths, self.z_depth)
 
     @property

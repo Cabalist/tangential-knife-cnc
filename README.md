@@ -1,7 +1,7 @@
-# tcnc
+# tangential-knife-cnc
 
 SVG in, LinuxCNC G-code out, for a 3.5-axis machine with an **oscillating
-tangential knife**: X/Y position, Z depth, an A axis that keeps the blade
+tangential knife** (the package and command are `tcnc`): X/Y position, Z depth, an A axis that keeps the blade
 tangent to the cut, and the oscillating head switched like a spindle.
 
 ```sh
@@ -17,13 +17,15 @@ written under `G21`.
 - Python 3.14 or newer.
 - A LinuxCNC-compatible controller with X, Y, Z and a rotary A axis about Z.
   The head is switched with `M3`/`M5` (with an optional `S` word).
-- Dependencies: [`utl-geom2d`](https://github.com/Cabalist/utl-geom2d) (2D
-  geometry kernel, LGPL) and [`svgelements`](https://pypi.org/project/svgelements/)
-  (SVG parsing, MIT).
+- Dependencies: [`tangential-knife-cnc-geometry`](https://github.com/Cabalist/tangential-knife-cnc-geometry)
+  (2D geometry kernel, import name `geom2d`, LGPL) and
+  [`svgelements`](https://pypi.org/project/svgelements/) (SVG parsing, MIT).
 
 ## Install
 
-From a checkout, with [uv](https://docs.astral.sh/uv/):
+From PyPI, once released: `uv tool install tangential-knife-cnc` (or
+`pipx install tangential-knife-cnc`). From a checkout, with
+[uv](https://docs.astral.sh/uv/):
 
 ```sh
 uv sync            # library + CLI into .venv
@@ -58,16 +60,24 @@ or as a tool: `uv tool install .` (or `pipx install .`).
    is still an ellipse. The loader converts faithfully; the resolution
    policy lives in the toolpath stage: `--tolerance` is the job's
    resolution, circular arcs are checked (and if need be repaired) against
-   their endpoints at it, a run of pieces shorter than it is replaced by
-   its chord or dropped, and a path whose ends meet within it is closed.
-   It must be at least geom2d's numerical floor (`1e-8`); the toolpath
-   remembers it and every later stage judges coincidence at the same
-   distance.
+   their endpoints at it, a Bézier or an arc that never leaves it around
+   its chord (and turns less than a degree) is the chord, and a path
+   whose ends meet within it is closed. Runs of
+   pieces shorter than it (dense polylines, tracer noise) are replaced by
+   chords that stay within it of every vertex they replace, a run that
+   fits inside it is left out, and where those chords sample a curve that
+   is smooth at this resolution the blade heading follows the curve, so a
+   densely sampled circle is still one smooth loop and a real corner is
+   still a corner. It must be at least geom2d's numerical floor (`1e-8`);
+   the toolpath remembers it and every later stage judges coincidence at
+   the same distance.
 3. **Order.** `--path-sort-method nearest` walks greedily from the origin,
    reversing open paths and rotating closed ones to start at the nearest
    vertex; `none` keeps file order.
 4. **Blade offset** (optional). With `--blade-offset` the path is shifted
-   forward by the distance the blade edge trails the axis; corners get a
+   forward, along the blade heading, by the distance the blade edge trails
+   the axis (a chord whose heading turns along it is shifted in pieces so
+   the edge stays within `--tolerance` of the artwork); corners get a
    small arc about the original vertex so the edge follows the artwork.
    Each connector remembers the whole turn of the source joint it spans
    (also after being split into 90° pieces), so a sharp corner is still a
@@ -136,8 +146,10 @@ that collides with the input or the preview), `2` SVG problem (missing or
 malformed file, nothing cuttable), `3` geometry, planning or output-file
 failure. Outputs are published as one unit: both files are generated in
 memory, written to unique temporary files, and only then moved into place;
-if any step fails, files already replaced are restored, so a failed run
-leaves the previous G-code and preview exactly as they were.
+if any step fails, files (or symlinks) already replaced are restored, so a
+failed run leaves the previous G-code and preview exactly as they were,
+and should a restoration itself fail the error names the backup that
+still holds the previous content.
 
 ## Machine contract
 
@@ -149,7 +161,11 @@ leaves the previous G-code and preview exactly as they were.
 - The material surface is Z0. `--z-depth` is below it, `--z-safe` above
   it and above every pass. Heights, the depth step and the feeds are
   validated on the values the machine will read, i.e. after rounding to
-  `--output-precision`, and a job may have at most 1000 passes.
+  `--output-precision`. Passes are planned on the grid of depths the
+  output can represent, spaced by the largest representable step not
+  above `--z-step`, so no written increment exceeds the step and no depth
+  is written twice; a step below the output resolution is rejected, and a
+  job may have at most 1000 passes.
 - Every word is written at `--output-precision` decimals and the writer
   tracks the rounded values, so modal suppression, arc validation and the
   choice of feed see what the controller sees. The default feed is chosen
@@ -158,8 +174,9 @@ leaves the previous G-code and preview exactly as they were.
   ends must agree within 0.005 mm, and the directed sweep the rounded
   words describe must be the nominal sweep (equal start and end angles
   mean a full turn to the controller). An arc that cannot be expressed at
-  that precision becomes a straight move when its chord is within the
-  output resolution of the arc, and an error otherwise. Segments that meet
+  that precision (its ends collapse onto each other or onto the centre, or
+  the written sweep would differ) becomes a straight move when its chord
+  is within the output resolution of the arc, and an error otherwise. Segments that meet
   within `--tolerance` rather than exactly are joined by the next move;
   before an arc the writer first feeds to the arc's own start point
   (nothing is written when the rounded words do not change).
@@ -180,8 +197,8 @@ and an orange dot wherever the knife lifts.
 from tcnc import KnifeOptions, load_document, plan_job, toolpaths_from_document, write_program
 
 opts = KnifeOptions(z_depth=-1.5, overcut=1.0, blade_offset=0.2, sort_method="nearest")
-doc = load_document("drawing.svg", opts)                    # every loader setting from the options
-plan = plan_job(toolpaths_from_document(doc, opts), opts)   # ordering, compensation, corners
+doc = load_document("drawing.svg", opts)  # every loader setting from the options
+plan = plan_job(toolpaths_from_document(doc, opts), opts)  # ordering, compensation, corners
 gcode = write_program(plan)
 ```
 
@@ -199,8 +216,8 @@ Errors are `ValueError` subclasses: `OptionError`, `SvgError`, `PlanError`,
 
 ## Dependencies
 
-- [`utl-geom2d`](https://github.com/Cabalist/utl-geom2d) 1.0: the 2D
-  geometry kernel. tcnc relies on `P`, `Line`, `Arc`, `CubicBezier`, the
+- [`tangential-knife-cnc-geometry`](https://github.com/Cabalist/tangential-knife-cnc-geometry)
+  1.0 (import name `geom2d`): the 2D geometry kernel. tcnc relies on `P`, `Line`, `Arc`, `CubicBezier`, the
   `Segment` protocol and `Path` helpers (`path_length`, `path_bounding_box`,
   `path_is_closed`), `Arc.from_sweep` and its construction invariant,
   `split_max_sweep`, `biarc_approximation`, `calc_rotation`,
@@ -229,10 +246,13 @@ TCNC_UPDATE_GOLDEN=1 uv run pytest tests/test_golden.py   # regenerate goldens o
 `stubs/svgelements/` holds the type stubs the checkers use for svgelements
 (its source is ISO-8859-1 encoded and unreadable to them); keep the stubs
 in step with what `src/tcnc/svg.py` uses. The hooks run `uv run --locked`,
-so they fail rather than resolve or change dependencies. CI checks this
-repository and `utl-geom2d` out side by side inside the workspace (the
-`../utl-geom2d` path source needs the sibling); publishing runs the same
-checks, including the wheel smoke test, before building.
+so they fail rather than resolve or change dependencies. The geometry
+kernel comes from PyPI (`tangential-knife-cnc-geometry`); to work against
+a local checkout of it, add a `[tool.uv.sources]` path entry locally and
+do not commit it. CI runs the checks, builds the wheel and installs it
+into a clean environment; publishing runs the same steps before building.
+Dependabot proposes weekly, grouped updates for the actions and for the
+uv lock (runtime dependencies and tooling separately).
 
 ## Licence and provenance
 

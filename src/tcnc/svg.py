@@ -125,22 +125,25 @@ class _Mapping:
 
     @property
     def is_similarity(self) -> bool:
-        """True when the matrix is a rotation/scale, possibly mirrored (circles stay circles)."""
+        """True when the matrix is a rotation/scale, possibly mirrored (circles stay circles).
+
+        Judged on the coefficients directly: the columns of a similarity
+        are equal in length and perpendicular, which for ``[[a, c], [b, d]]``
+        means ``a = d, b = -c`` (proper) or ``a = -d, b = c`` (mirrored),
+        within a relative slack. No singular values are involved; their
+        discriminant loses the difference for ordinary rotations.
+        """
         a, b, c, d = self.matrix.a, self.matrix.b, self.matrix.c, self.matrix.d
-        big, small = _singular_values(self.matrix)
-        return (
-            big > 0.0
-            and abs(big - small) <= big * 1e-9
-            and (
-                (abs(a - d) <= big * 1e-9 and abs(b + c) <= big * 1e-9)
-                or (abs(a + d) <= big * 1e-9 and abs(b - c) <= big * 1e-9)
-            )
+        scale = math.hypot(a, b)
+        slack = scale * 1e-9
+        return scale > 0.0 and (
+            (abs(a - d) <= slack and abs(b + c) <= slack) or (abs(a + d) <= slack and abs(b - c) <= slack)
         )
 
     @property
     def uniform_scale(self) -> float:
         """Length scale of a similarity mapping."""
-        return math.sqrt(abs(self.matrix.determinant)) * self.frame.scale
+        return math.hypot(self.matrix.a, self.matrix.b) * self.frame.scale
 
 
 def _singular_values(matrix: se.Matrix) -> tuple[float, float]:

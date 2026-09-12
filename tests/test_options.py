@@ -62,6 +62,44 @@ def test_invalid_values_raise_option_error(factory: Callable[[], KnifeOptions]) 
         factory()
 
 
+@pytest.mark.parametrize(("precision", "step", "depth"), [(1, 0.14, -0.42), (3, 0.0011, -0.011), (3, 0.03, -0.1)])
+def test_pass_increments_respect_the_step_after_rounding(precision: int, step: float, depth: float) -> None:
+    opts = KnifeOptions(output_precision=precision, z_step=step, z_depth=depth)
+    written = [round(z, precision) for z in opts.pass_depths]
+    increments = [a - b for a, b in zip([0.0, *written], written, strict=False)]
+    assert increments
+    assert max(increments) <= step + 1e-12, (written, increments)
+    assert len(written) == len(set(written))
+    assert written[-1] == round(depth, precision)
+    assert opts.pass_count == len(written)
+
+
+def test_steps_below_the_output_resolution_are_rejected() -> None:
+    with pytest.raises(OptionError, match="below the output resolution"):
+        KnifeOptions(z_step=0.0006, z_depth=-0.0048)
+    with pytest.raises(OptionError, match="passes"):
+        KnifeOptions(z_depth=-2.0, z_step=0.001)
+    assert KnifeOptions(output_precision=1, z_step=0.14, z_depth=-0.42).pass_depths == (-0.1, -0.2, -0.3, -0.42)
+
+
+@pytest.mark.parametrize(("precision", "step", "depth"), [(3, 0.009, -9.0), (4, 0.0013, -1.3), (3, 0.001, -1.0004)])
+def test_exactly_one_thousand_written_passes_are_accepted(precision: int, step: float, depth: float) -> None:
+    opts = KnifeOptions(output_precision=precision, z_step=step, z_depth=depth)
+    assert opts.pass_count == 1000
+    written = [round(z, precision) for z in opts.pass_depths]
+    assert len(written) == len(set(written))
+    assert written[-1] == round(depth, precision)
+
+
+def test_absurd_steps_and_depths_stay_within_the_option_contract() -> None:
+    for step in (1e306, 1e308):
+        assert KnifeOptions(z_step=step).pass_depths == (-1.0,)
+    with pytest.raises(OptionError, match="too deep"):
+        KnifeOptions(z_depth=-1e308, z_step=0.001)
+    with pytest.raises(OptionError, match="too deep"):
+        KnifeOptions(z_depth=-1e300, output_precision=9)
+
+
 def test_rounded_values_are_named_in_the_message() -> None:
     with pytest.raises(OptionError, match="rounds to Z0"):
         KnifeOptions(z_safe=0.0004)

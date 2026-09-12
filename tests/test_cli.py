@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from geom2d import P
 
 from tcnc.cli import EXIT_OK, EXIT_PLAN, EXIT_SVG, EXIT_USAGE, build_parser, main, options_from_namespace, run
 from tcnc.errors import OptionError
@@ -103,6 +104,28 @@ def test_runs_of_short_links_are_cut_not_rejected(tmp_path: Path) -> None:
         path = tmp_path / "links.svg"
         path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="384" height="384"><path d="{data}"/></svg>')
         assert main([str(path), "-o", str(tmp_path / "links.ngc")]) == EXIT_OK
+
+
+def test_awkward_geometry_reaches_the_documented_exit_codes(tmp_path: Path) -> None:
+    # An arc whose end rounds onto its centre at three decimals (allowed by a 1e-7 tolerance).
+    radius = 0.00051001
+    p1, p2 = P.from_polar(radius, 0.1), P.from_polar(radius, 0.4)
+    arc = tmp_path / "arc.svg"
+    arc.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1mm" height="1mm" viewBox="0 0 1 1">'
+        f'<path d="M{p1.x!r} {p1.y!r} A{radius!r} {radius!r} 0 0 1 {p2.x!r} {p2.y!r}"/></svg>'
+    )
+    assert main([str(arc), "-o", str(tmp_path / "arc.ngc"), "--tolerance", "1e-7"]) in (EXIT_OK, EXIT_PLAN)
+    # A thin ellipse is cut, not rejected during curve fitting.
+    thin = tmp_path / "thin.svg"
+    thin.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="384" height="384">'
+        '<path d="M96 96 A100 0.000001 0 1 1 106 96"/></svg>'
+    )
+    assert main([str(thin), "-o", str(tmp_path / "thin.ngc")]) == EXIT_OK
+    assert (
+        main([str(thin), "-o", str(tmp_path / "thin-offset.ngc"), "--blade-offset", "1", "--overcut", "1"]) == EXIT_OK
+    )
 
 
 def test_output_and_preview_must_be_distinct(fixture: Callable[[str], Path], tmp_path: Path) -> None:

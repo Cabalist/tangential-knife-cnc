@@ -1,11 +1,13 @@
 """Publish generated files together, or not at all.
 
 Every file is written to a unique temporary file in its destination
-directory first. Then, one by one, each destination is moved aside and the
-temporary file moved into place. If any step fails, the destinations that
-were already replaced are restored from their moved-aside originals, every
-temporary file is removed and ``OutputError`` is raised: a failed run leaves
-the previous files exactly as they were.
+directory first. Then, one by one, each destination entry (a file or a
+symlink, dangling or not) is moved aside and the temporary file moved into
+place. If any step fails, the destinations that were already replaced are
+restored from their moved-aside originals, every temporary file is removed
+and ``OutputError`` is raised: a failed run leaves the previous files
+exactly as they were. Should a restoration itself fail, the error names
+the destination and the backup that still holds its previous content.
 """
 
 import os
@@ -38,8 +40,8 @@ def publish(outputs: Sequence[tuple[Path | str, str]]) -> None:
         for temp, path in staged:
             _replace(temp, path, replaced)
     except OSError as exc:
-        _roll_back(staged, replaced)
-        msg = f"cannot write output: {exc}"
+        problems = _roll_back(staged, replaced)
+        msg = "; ".join([f"cannot write output: {exc}", *problems])
         raise OutputError(msg) from exc
     for _, backup in replaced:
         if backup is not None:
@@ -62,7 +64,15 @@ def _stage(path: Path, text: str) -> Path:
     descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     temp = Path(name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+    except OSError:
+        with suppress(OSError):
+            os.close(descriptor)
+        with suppress(OSError):
+            temp.unlink(missing_ok=True)
+        raise
+    try:
+        with handle:
             handle.write(text)
     except OSError:
         with suppress(OSError):
@@ -72,23 +82,28 @@ def _stage(path: Path, text: str) -> Path:
 
 
 def _replace(temp: Path, path: Path, replaced: list[tuple[Path, Path | None]]) -> None:
-    """Move the previous file aside (recorded for rollback), then the staged file into place."""
+    """Move the previous directory entry aside (recorded for rollback), then the staged file into place."""
     backup: Path | None = None
-    if path.exists():
+    if path.is_symlink() or path.exists():
         backup = path.with_name(f".{path.name}.{uuid4().hex}.bak")
         path.replace(backup)
     replaced.append((path, backup))
     temp.replace(path)
 
 
-def _roll_back(staged: Sequence[tuple[Path, Path]], replaced: Sequence[tuple[Path, Path | None]]) -> None:
-    """Restore every replaced destination and remove every temporary file; nothing here raises."""
+def _roll_back(staged: Sequence[tuple[Path, Path]], replaced: Sequence[tuple[Path, Path | None]]) -> list[str]:
+    """Restore every replaced destination and remove every temporary file; returns what could not be undone."""
+    problems: list[str] = []
     for path, backup in reversed(replaced):
-        with suppress(OSError):
+        try:
             if backup is None:
                 path.unlink(missing_ok=True)
             else:
                 backup.replace(path)
+        except OSError as exc:
+            where = f"its previous content is kept at {backup}" if backup is not None else "the new file remains"
+            problems.append(f"restoring {path} failed ({exc}); {where}")
     for temp, _ in staged:
         with suppress(OSError):
             temp.unlink(missing_ok=True)
+    return problems

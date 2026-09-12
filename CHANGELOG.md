@@ -25,6 +25,67 @@ Metric only and a job-scoped tolerance (both API changes):
   `PlanError` with the source id; a loop's overrun is validated against
   the loop's start.
 
+Fixes from the fourth audit (2026-09-12), all with behavioural tests:
+
+- Blade compensation follows the blade headings, not the chord
+  directions: a line whose heading turns along it (the chords of a
+  simplified curve) is cut into pieces shifted along their own headings,
+  enough that the blade edge stays within the tolerance of the artwork;
+  smooth chord joints shift onto one point, so no spurious connectors
+  appear. An arc with headings other than its tangents is rejected.
+- The simplifier keeps every vertex within the tolerance of the result
+  (a run is dropped only when it fits inside the tolerance around its
+  start, and a retracing run is cut where it turns back), rejects source
+  pieces that do not connect before it merges anything, and does constant
+  work per piece (100,000 collinear edges in about 0.1 s).
+- A Bézier is replaced by its chord only when its end tangents also lie
+  along the chord, so a tiny quarter circle keeps its 90° of blade
+  rotation; a sub-tolerance hook at the end of a long curve stays a
+  corner.
+- Passes are counted in whole grid cells shared by validation and the
+  schedule, so exactly 1000 passes are accepted; a step or depth too large
+  for the grid is a single pass or an `OptionError`, never an overflow.
+- Tooling: PLR2004 applies to the sources (the precision limit is named);
+  the formatter scope of the hooks and CI covers Markdown examples;
+  Dependabot keeps the actions and the uv lock current (weekly, grouped);
+  the workflows use the current action releases.
+
+Fixes from the third audit (2026-09-12), all with behavioural tests:
+
+- Simplification has a bounded error: a run of sub-tolerance pieces is
+  replaced by chords that stay within the tolerance of every vertex they
+  replace (a dense circle is no longer erased, a dense semicircle no
+  longer flattened), and where the chords sample a curve that is smooth at
+  the tolerance the blade heading follows that curve, so a densely
+  sampled circle cuts as one smooth loop while real corners stay corners.
+- Passes are planned on the output's depth grid: no written increment
+  exceeds `--z-step`, no depth repeats, a step below the output resolution
+  is an error, and the pass limit is checked before any arithmetic can
+  overflow.
+- Writer: an arc whose end rounds onto its centre takes the same exit as
+  every other unrepresentable arc (straight move within the resolution,
+  otherwise an error) instead of a division by zero.
+- Curves: a Bézier within the resolution of its chord is the chord, a
+  nearly straight curve for which geom2d cannot form a candidate arc
+  falls back to its chord within the biarc budget, and an arc that never
+  leaves the resolution around its chord and turns less than 1° is its
+  chord (such arcs have radii beyond geom2d's numerical floor and broke
+  blade compensation); thin ellipses now cut, with and without offset.
+- `Segment` checks a hinted rotation against the headings it resolves
+  from geometry, so partial hints cannot disagree with `heading_at`.
+- SVG: similarity transforms are recognised from the matrix coefficients;
+  a rotated circle stays four exact arcs at every angle.
+- Output: dangling symlinks are backed up and restored like files; a
+  failed restoration is reported with the backup's path; a temporary
+  file's descriptor is closed when it cannot be wrapped.
+- Renamed: the distribution and repository are `tangential-knife-cnc`
+  (the package and command stay `tcnc`). The geometry dependency is
+  `tangential-knife-cnc-geometry` 1.0.0 from PyPI (import name unchanged,
+  `geom2d`); the sibling-checkout path source and the CI checkout of it
+  are gone. geom2d itself now treats a failed biarc candidate as no
+  candidate, so the chord fallback in `Toolpath.from_geometry` is only a
+  backstop.
+
 Fixes from the second audit (2026-09-12), all with behavioural tests:
 
 - Writer: an arc is validated on the sweep LinuxCNC reconstructs from the

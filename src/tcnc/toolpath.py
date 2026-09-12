@@ -33,6 +33,10 @@ type SourceGeometry = Line | Arc | CubicBezier
 MAX_ARC_ANGLE = math.pi / 2.0
 _SWEEP_SLACK = 1e-9
 _HEADING_SLACK = 1e-9
+# An arc that never leaves the resolution around its chord and turns less than this is its chord: such arcs
+# come from fitting nearly straight curves, have radii beyond geom2d's absolute numerical floor, and change
+# no heading the job can resolve.
+_FLAT_ARC_TURN = math.radians(1.0)
 
 
 def _opposite(angle: float | None) -> float | None:
@@ -88,10 +92,25 @@ class Hints:
 
 @dataclass(frozen=True, slots=True)
 class Segment:
-    """One geometry segment plus its heading hints."""
+    """One geometry segment plus its heading hints.
+
+    A hinted ``turn`` must lead from the resolved start heading to the
+    resolved end heading, geometry defaults included, so ``heading_at``,
+    the endpoint headings and the writer's rotation always agree.
+    """
 
     geom: Geometry
     hints: Hints = Hints()
+
+    def __post_init__(self) -> None:
+        """Check the rotation against the headings the segment actually reports."""
+        turn = self.hints.turn
+        if turn is not None and not geom2d.angle_eq(self.start_heading + turn, self.end_heading, _HEADING_SLACK):
+            msg = (
+                f"hint turn {turn!r} does not lead from the segment's start heading {self.start_heading!r} "
+                f"to its end heading {self.end_heading!r}"
+            )
+            raise PlanError(msg)
 
     # geom2d.Segment protocol -------------------------------------------------
 
@@ -287,25 +306,39 @@ class Toolpath:
     ) -> Toolpath | None:
         """Convert connected lines, arcs and cubic Béziers into a toolpath.
 
-        Béziers become biarcs within ``biarc_tolerance`` and arcs are split
-        to at most 90°. ``tolerance`` (a distance, default geom2d's
-        ``EPSILON``) is the resolution of the result: a run of consecutive
-        pieces each shorter than it is replaced by its chord, or dropped
-        when even the chord is shorter, so no piece carries a heading the
-        job cannot resolve; the path is closed when its ends meet within it.
-        Returns ``None`` when nothing usable remains; raises ``PlanError``
-        when the pieces do not connect or geom2d cannot approximate a curve.
+        Béziers become biarcs within ``biarc_tolerance`` (a Bézier that
+        stays within the resolution of its chord is the chord) and arcs are
+        split to at most 90°. ``tolerance`` (a distance, default geom2d's
+        ``EPSILON``) is the resolution of the result: runs of consecutive
+        pieces shorter than it are replaced by chords that stay within it of
+        every vertex they replace, a run that fits inside it is left out,
+        and where such chords meet each other or their neighbours on a
+        curve that is smooth at this resolution the blade heading follows
+        that curve rather than the chords (see ``simplify``). The path is
+        closed when its ends meet within the tolerance. Returns ``None``
+        when nothing usable remains; raises ``PlanError`` when the pieces do
+        not connect or geom2d cannot approximate a curve.
         """
         resolution = const.EPSILON if tolerance is None else tolerance
         try:
-            pieces = _flatten(path, biarc_tolerance, biarc_max_depth)
+            pieces = _flatten(path, biarc_tolerance, biarc_max_depth, resolution)
         except GeometryError as exc:
             msg = f"path {source_id or '<unnamed>'}: {exc}"
             raise PlanError(msg) from exc
-        segments = [Segment(piece) for piece in _merge_short(pieces, resolution)]
-        if not segments:
+        for index in range(1, len(pieces)):
+            before, after = pieces[index - 1], pieces[index]
+            if not before.p2.almost_equal(after.p1, tolerance):
+                msg = (
+                    f"path {source_id or '<unnamed>'}: pieces {index - 1} and {index} do not connect: "
+                    f"{before.p2} vs {after.p1}"
+                )
+                raise PlanError(msg)
+        simplified = _simplify(pieces, resolution)
+        if not simplified:
             return None
-        closed = segments[0].p1.almost_equal(segments[-1].p2, tolerance) and (len(segments) > 1 or segments[0].is_arc)
+        first, last = simplified[0].geom, simplified[-1].geom
+        closed = first.p1.almost_equal(last.p2, tolerance) and (len(simplified) > 1 or isinstance(first, Arc))
+        segments = _smoothed(simplified, resolution, closed=closed)
         return cls(tuple(segments), closed=closed, source_id=source_id, tolerance=tolerance)
 
     def with_segments(self, segments: Sequence[Segment], *, closed: bool | None = None) -> Toolpath:
@@ -355,41 +388,225 @@ def check_traversal(segments: Sequence[Segment], tolerance: float | None, *, clo
             raise PlanError(msg)
 
 
-def _flatten(path: Sequence[SourceGeometry], biarc_tolerance: float, biarc_max_depth: int) -> list[Geometry]:
+def _flatten(
+    path: Sequence[SourceGeometry], biarc_tolerance: float, biarc_max_depth: int, resolution: float
+) -> list[Geometry]:
     """Lines and arcs (at most 90° each) for the source geometry, in order."""
     pieces: list[Geometry] = []
     for geom in path:
         match geom:
             case CubicBezier():
-                pieces.extend(
-                    geom.biarc_approximation(biarc_tolerance, max_depth=biarc_max_depth, max_arc_angle=MAX_ARC_ANGLE)
-                )
+                pieces.extend(_curve_pieces(geom, biarc_tolerance, biarc_max_depth, resolution))
             case Arc():
                 pieces.extend(geom.split_max_sweep(MAX_ARC_ANGLE))
             case Line():
                 pieces.append(geom)
-    return pieces
+    return [_flattened(piece, resolution) for piece in pieces]
 
 
-def _merge_short(pieces: Sequence[Geometry], resolution: float) -> list[Geometry]:
-    """Replace every run of pieces shorter than ``resolution`` by its chord, or drop it when the chord is short too."""
-    out: list[Geometry] = []
-    run_start: P | None = None
-    run_end: P | None = None
+def _flattened(piece: Geometry, resolution: float) -> Geometry:
+    """``piece``, or its chord for an arc that is straight at this resolution (see ``_FLAT_ARC_TURN``)."""
+    if isinstance(piece, Arc) and abs(piece.angle) <= _FLAT_ARC_TURN:
+        sagitta = piece.radius * (1.0 - math.cos(piece.angle / 2.0))
+        if sagitta <= resolution:
+            return Line(piece.p1, piece.p2)
+    return piece
+
+
+def _curve_pieces(
+    curve: CubicBezier, biarc_tolerance: float, biarc_max_depth: int, resolution: float
+) -> list[Geometry]:
+    """Biarcs for ``curve``; its chord when the curve is straight at the resolution (or within the biarc budget).
+
+    A curve whose control polygon stays within ``resolution`` of the chord
+    and whose end tangents lie along it (within ``_FLAT_ARC_TURN``) carries
+    neither a feature nor a heading the job can resolve, so the chord
+    stands in for it without asking geom2d for arcs of astronomical
+    radius. Distance alone is not enough: a tiny quarter circle is within
+    the resolution of its chord yet turns the blade by 90°. geom2d may
+    also fail to form a candidate arc for a curve that is nearly straight
+    at the biarc tolerance; under the same angular condition the chord is
+    within that budget and is used.
+    """
+    if _straight_at(curve, resolution):
+        return [curve.chord]
+    try:
+        return list(curve.biarc_approximation(biarc_tolerance, max_depth=biarc_max_depth, max_arc_angle=MAX_ARC_ANGLE))
+    except GeometryError:
+        if _straight_at(curve, biarc_tolerance):
+            return [curve.chord]
+        raise
+
+
+def _straight_at(curve: CubicBezier, distance: float) -> bool:
+    """True when ``curve`` stays within ``distance`` of its chord and both end tangents lie along the chord."""
+    chord = curve.chord
+    if chord.is_degenerate or curve.flatness > distance:
+        return False
+    direction = chord.angle
+    return geom2d.angle_eq(curve.start_tangent_angle, direction, _FLAT_ARC_TURN) and geom2d.angle_eq(
+        curve.end_tangent_angle, direction, _FLAT_ARC_TURN
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Piece:
+    """A piece of a simplified path; ``chord`` marks a line that replaced a run of short pieces."""
+
+    geom: Geometry
+    chord: bool
+
+
+@dataclass(slots=True)
+class _Run:
+    """A run of short pieces being replaced by the chord from ``start`` to ``end``.
+
+    The chord must stay within the resolution of every vertex the run has
+    absorbed. Two bounds make that a constant-time test per piece: ``far``,
+    the distance from the start to the farthest vertex, which the end is
+    required to reach (so no vertex projects beyond the chord and a run
+    that doubles back is cut short), and a cone of chord directions, the
+    intersection over every vertex more than the resolution from the start
+    of the directions along which the line through the start passes
+    within the resolution of that vertex. Directions are kept relative to
+    the first constraining vertex so the cone never straddles the ±π seam.
+    """
+
+    start: P
+    end: P
+    far: float = 0.0
+    reference: float | None = None
+    low: float = -math.pi
+    high: float = math.pi
+
+    @classmethod
+    def begin(cls, start: P, end: P, resolution: float) -> _Run:
+        run = cls(start, start)
+        run.extend(end, resolution)
+        return run
+
+    def accepts(self, point: P) -> bool:
+        """True when the chord from the start to ``point`` stays within the resolution of every absorbed vertex."""
+        distance = self.start.distance(point)
+        if distance < self.far:
+            return False
+        if self.reference is None:
+            return True
+        relative = geom2d.normalize_angle((point - self.start).angle - self.reference, center=0.0)
+        return any(self.low <= angle <= self.high for angle in (relative, relative + math.tau, relative - math.tau))
+
+    def extend(self, point: P, resolution: float) -> None:
+        """Make ``point`` the end; from now on the chord must pass within the resolution of it."""
+        self.end = point
+        distance = self.start.distance(point)
+        self.far = max(self.far, distance)
+        if distance <= resolution:
+            return
+        half = math.asin(min(1.0, resolution / distance))
+        direction = (point - self.start).angle
+        if self.reference is None:
+            self.reference, self.low, self.high = direction, -half, half
+            return
+        relative = geom2d.normalize_angle(direction - self.reference, center=0.0)
+        self.low, self.high = max(self.low, relative - half), min(self.high, relative + half)
+
+
+def _simplify(pieces: Sequence[Geometry], resolution: float) -> list[_Piece]:
+    """Replace runs of pieces shorter than ``resolution`` by chords within ``resolution`` of every replaced vertex.
+
+    A run grows while the chord from its start to the candidate end stays
+    within the resolution of every vertex absorbed so far (see ``_Run``;
+    the work is constant per piece). When the next piece would break that,
+    the run so far becomes one chord and a new run starts at its end. A
+    run whose chord is shorter than the resolution fits entirely inside
+    the resolution around its start (the end is always the farthest
+    vertex), so it is left out and the following run continues from the
+    same start; no vertex is ever further than the resolution from the
+    result and no gap wider than the resolution can open between kept
+    pieces. Pieces at least the resolution long are kept as they are.
+    """
+    out: list[_Piece] = []
+    run: _Run | None = None
+
+    def flush() -> None:
+        nonlocal run
+        if run is not None and run.far >= resolution:
+            out.append(_Piece(Line(run.start, run.end), chord=True))
+        run = None
+
     for piece in pieces:
-        if piece.length < resolution:
-            if run_start is None:
-                run_start = piece.p1
-            run_end = piece.p2
+        if piece.length >= resolution:
+            flush()
+            out.append(_Piece(piece, chord=False))
             continue
-        if run_start is not None and run_end is not None:
-            chord = Line(run_start, run_end)
-            if chord.length >= resolution:
-                out.append(chord)
-            run_start = run_end = None
-        out.append(piece)
-    if run_start is not None and run_end is not None:
-        chord = Line(run_start, run_end)
-        if chord.length >= resolution:
-            out.append(chord)
+        if run is None:
+            run = _Run.begin(piece.p1, piece.p2, resolution)
+            continue
+        if run.accepts(piece.p2):
+            run.extend(piece.p2, resolution)
+            continue
+        if run.far >= resolution:
+            out.append(_Piece(Line(run.start, run.end), chord=True))
+            run = _Run.begin(run.end, piece.p2, resolution)
+        else:
+            run = _Run.begin(run.start, piece.p2, resolution)
+    flush()
     return out
+
+
+def _smoothed(simplified: Sequence[_Piece], resolution: float, *, closed: bool) -> list[Segment]:
+    """Segments for the simplified pieces, with blade headings that follow a curve the chords sample.
+
+    At a joint where at least one side is a chord and both sides are
+    lines, the circle through the joint and its two neighbouring vertices
+    is the curve the chords may be sampling. When both chords stay within
+    the resolution of that circle, the data is a smooth curve at this
+    resolution and the blade heading at the joint is the circle's tangent
+    (the bisector of the two chord directions); otherwise the joint is a
+    real corner and the chords keep their own headings.
+    """
+    count = len(simplified)
+    starts: list[float | None] = [None] * count
+    ends: list[float | None] = [None] * count
+    joints = list(range(1, count))
+    if closed and count > 1:
+        joints.append(0)
+    for joint in joints:
+        before, after = simplified[joint - 1], simplified[joint]
+        if not (before.chord or after.chord) or not isinstance(before.geom, Line) or not isinstance(after.geom, Line):
+            continue
+        heading = _smooth_heading(before.geom, after.geom, resolution)
+        if heading is not None:
+            ends[joint - 1] = heading
+            starts[joint] = heading
+    return [
+        Segment(piece.geom, Hints(start_heading=starts[index], end_heading=ends[index]))
+        for index, piece in enumerate(simplified)
+    ]
+
+
+def _smooth_heading(before: Line, after: Line, resolution: float) -> float | None:
+    """The tangent at the joint of the circle through both lines' far ends, if both lines lie within ``resolution`` of it.
+
+    On that circle the tangent at the joint leaves the first chord by half
+    of the chord's central angle (the inscribed-angle theorem), which is
+    the bisector of the two chord directions only when the chords are
+    equally long.
+    """
+    turn = geom2d.calc_rotation(before.angle, after.angle)
+    if abs(turn) > MAX_ARC_ANGLE:
+        return None
+    if turn == 0.0:
+        return before.angle
+    a, b, c = before.p1, before.p2, after.p2
+    doubled_area = abs((b - a).cross(c - a))
+    if doubled_area == 0.0:
+        return None
+    radius = before.length * after.length * a.distance(c) / (2.0 * doubled_area)
+    for half_chord in (before.length / 2.0, after.length / 2.0):
+        rest = math.sqrt(max(0.0, radius * radius - half_chord * half_chord))
+        sagitta = half_chord * half_chord / (radius + rest)
+        if sagitta > resolution:
+            return None
+    half_central_angle = math.asin(min(1.0, before.length / (2.0 * radius)))
+    return before.angle + math.copysign(half_central_angle, turn)

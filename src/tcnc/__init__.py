@@ -5,7 +5,7 @@ Rewritten in 2026 from utlco/utl-tcnc by Claude Zervas (LGPL-3.0).
 
 from importlib.metadata import version
 
-__version__ = version("utl-tcnc")
+__version__ = version("tangential-knife-cnc")
 
 from tcnc.corners import Cut, CutPlan, plan_cuts
 from tcnc.errors import OptionError, OutputError, PlanError, SvgError, TcncError

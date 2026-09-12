@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "utl-tcnc"
+name = "tangential-knife-cnc"
 version = "1.0.0"
 description = "SVG to LinuxCNC G-code for an oscillating tangential knife"
 readme = "README.md"
@@ -21,7 +21,7 @@ classifiers = [
 ]
 # Upstream: utlco/utl-tcnc by Claude Zervas (LGPL-3.0). Rewritten 2026-09.
 dependencies = [
-    "utl-geom2d>=1.0.0",
+    "tangential-knife-cnc-geometry>=1.0.0",
     "svgelements>=1.9",
 ]
 
@@ -40,7 +40,7 @@ dev = [
 tcnc = "tcnc.cli:main"
 
 [project.urls]
-Repository = "https://github.com/Cabalist/utl-tcnc"
+Repository = "https://github.com/Cabalist/tangential-knife-cnc"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -51,12 +51,6 @@ include = ["tcnc*"]
 
 [tool.setuptools.package-data]
 "tcnc" = ["py.typed"]
-
-[tool.uv.sources]
-# Local sibling checkout while geom2d 1.0.0 is untagged and unpublished.
-# Switch to { git = "https://github.com/Cabalist/utl-geom2d.git", tag = "v1.0.0" }
-# once the tag exists; CI cannot resolve the relative path.
-utl-geom2d = { path = "../utl-geom2d", editable = true }
 
 [tool.ruff]
 target-version = "py314"
@@ -100,7 +94,6 @@ select = [
 ]
 ignore = [
     "E501",    # line too long (handled by formatter)
-    "PLR2004",
     "TRY003",
 ]
 per-file-ignores = { "tests/**" = ["PLR2004", "ARG001"], "tests/test_cli.py" = ["SLF001"], "stubs/**" = ["ANN401", "I001"] }
