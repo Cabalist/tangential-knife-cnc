@@ -1,0 +1,3 @@
+# Layered over box.toml: a machine whose tool changes happen at machine Z-5 (G53).
+[job]
+tool_change_z = -5

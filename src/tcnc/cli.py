@@ -21,7 +21,7 @@ from tcnc.gcode import write_program
 from tcnc.jobfile import load_job_files
 from tcnc.options import Job, KnifeOptions, as_job
 from tcnc.output import publish
-from tcnc.plan import load_document, plan_job
+from tcnc.plan import SkippedContent, load_document, plan_job, skipped_content
 from tcnc.preview import preview_svg
 
 if TYPE_CHECKING:
@@ -47,11 +47,12 @@ class _Parser(argparse.ArgumentParser):
 
 @dataclass(frozen=True, slots=True)
 class RunResult:
-    """What a run produced."""
+    """What a run produced, and what the drawing contains that the program does not (``skipped``)."""
 
     output: Path
     preview: Path | None
     plan: JobPlan
+    skipped: tuple[SkippedContent, ...] = ()
 
 
 # Options that describe the single-knife job; they cannot accompany a job file.
@@ -386,7 +387,7 @@ def run(  # noqa: PLR0913 - one parameter per file involved
     if preview_path is not None:
         outputs.append((preview_path, preview_svg(plan, page=(document.width, document.height))))
     publish(outputs)
-    return RunResult(output_path, preview_path, plan)
+    return RunResult(output_path, preview_path, plan, skipped_content(document, plan))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -408,6 +409,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(_summary(result))  # noqa: T201
     if result.preview is not None:
         print(f"{result.preview}: preview")  # noqa: T201
+    sys.stdout.flush()  # the summary first, then the report, even when both go to one file
+    for record in result.skipped:
+        print(f"tcnc: skipped: {_skipped_line(record)}", file=sys.stderr)  # noqa: T201
     return EXIT_OK
 
 
@@ -454,6 +458,18 @@ def _summary(result: RunResult) -> str:
         for operation in operations
     ]
     return f"{result.output}: {', '.join(parts)}"
+
+
+_SKIP_NOUNS = {"path": "path", "text": "text element", "image": "image", "foreignObject": "foreign object"}
+_SKIP_REASONS = {"unselected": "not selected by any operation", "hidden": "hidden", "unsupported": "cannot be cut"}
+
+
+def _skipped_line(record: SkippedContent) -> str:
+    """One line of the skipped-content report: where, how many of what, and why."""
+    where = f"layer {record.layer}" if record.layer is not None else "outside any layer"
+    noun = _SKIP_NOUNS.get(record.tag, record.tag)
+    plural = "s" if record.count != 1 else ""
+    return f"{where}: {record.count} {noun}{plural} {_SKIP_REASONS[record.kind]}"
 
 
 def _fail(code: int, exc: Exception, *, debug: bool) -> int:

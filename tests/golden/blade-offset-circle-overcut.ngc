@@ -12,7 +12,6 @@ G94  ; feed in mm per minute
 G91.1  ; arc centres relative to the start point
 G97  ; spindle speed in RPM
 G40  ; no cutter compensation
-G49  ; no tool length compensation
 F250.000  ; default feed
 
 M3  ; oscillation on
@@ -29,6 +28,7 @@ G2 X74.768 Y41.018 A-461.066 I-25.400 J5.000
 G0 Z10.000  ; lift
 
 M5  ; oscillation off
+G0 A0.000  ; A axis back to zero for the next program
 
 M2  ; end of program
 %

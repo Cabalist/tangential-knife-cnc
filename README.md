@@ -47,7 +47,11 @@ or as a tool: `uv tool install .` (or `pipx install .`).
    candidate; `--id` (an element id or a clone's id) and `--layer` narrow
    the selection. Elements with `display:none` or `visibility:hidden` are
    skipped; opacity, clipping and masks are not considered. Malformed path
-   data is an error, not a silently missing cut. The root `<svg>` must
+   data is an error, not a silently missing cut. Nothing else goes missing
+   silently either: at the end of a run tcnc lists on standard error what
+   the drawing contains that the program does not, one line per layer and
+   reason (paths no operation selects, hidden content, text and images,
+   which it cannot cut). The root `<svg>` must
    declare `width` and `height`; a physical unit there (mm, cm, in, pt,
    pc) is converted to px exactly before parsing, so the page has the size
    it declares and px content keeps its exact scale.
@@ -112,7 +116,9 @@ mounting angle). At every corner and every rapid it takes the shortest
 rotation, so its value accumulates around closed shapes. Configure the
 A axis in LinuxCNC as an **unwrapped** rotary axis (no `WRAPPED_ROTARY`);
 a wrapped axis rejects absolute values at or beyond ±360 and would need a
-different encoding.
+different encoding. Every program assumes A = 0 at its start and ends by
+unwinding to `A0` after the last lift, with the head off, so one sheet
+leaves the axis where the next one expects it.
 
 ## Options
 
@@ -246,11 +252,11 @@ back to it. Nothing LinuxCNC does itself is repeated: the program does
 not move to a change position, wait for the change or set offsets by
 hand; `G43` after `M6` applies the loaded tool's tool-table offsets, and
 each tool is assumed to have been touched off so that Z0 is the material
-surface. Before every change the program retracts to safe height, for
-the first change in the coordinates active at the start (the header
-cancels tool length compensation), so make sure that height clears the
-material for whatever is mounted, or let `TOOL_CHANGE_QUILL_UP` handle
-the retract. After `G43` every axis is positioned again explicitly,
+surface. With `tool_change_z` set, the program goes to that height in
+machine coordinates (`G53 G0 Z`) before every change, a frame no work
+offset or tool length can shift; without it, no retract is written and
+the controller's `TOOL_CHANGE_QUILL_UP` is expected to lift the head.
+After `G43` every axis is positioned again explicitly,
 since `M6` may have moved the machine and `G43` changes the compensated
 coordinates. The job file itself can never be an output.
 
@@ -258,9 +264,11 @@ coordinates. The job file itself can never be an output.
 
 - Header modes: `G17` (XY plane), `G21` (millimetres), `G90` (absolute),
   `G94` (feed per minute), `G91.1` (arc centres relative to the start),
-  `G97` (spindle speed in RPM), `G40`, `G49`, then `G64`/`G61` only when
-  `--blend-mode` asks for it. The active work coordinate system is left as
-  the controller has it.
+  `G97` (spindle speed in RPM), `G40`, then `G64`/`G61` only when
+  `--blend-mode` asks for it. The active work coordinate system and the
+  tool length compensation are left as the controller has them: a
+  program without a tool change runs in the state it starts in, so Z0
+  must be the material surface in that state.
 - The material surface is Z0. `--z-depth` is below it, `--z-safe` above
   it and above every pass. Heights, the depth step and the feeds are
   validated on the values the machine will read, i.e. after rounding to
@@ -352,6 +360,23 @@ uv run prek run --all-files   # ruff check + format, ty, pyrefly
 uv run pytest                 # unit, fixture and golden tests
 TCNC_UPDATE_GOLDEN=1 uv run pytest tests/test_golden.py   # regenerate goldens on purpose
 ```
+
+Releasing:
+
+```sh
+make check                   # the CI checks, locally
+make release VERSION=1.2.3   # set the version, lock, check, commit, tag v1.2.3 and push
+```
+
+`release` wants a clean tree on `main`, a `## X (unreleased)` section at
+the top of `CHANGELOG.md` (it becomes `## 1.2.3 (date)`) and a tag that
+exists neither locally nor on `origin`. The version lives in
+`pyproject.toml` alone: `uv.lock` records it (`uv lock` refreshes that)
+and `tcnc.__version__` reads it from the installed metadata. Pushing the
+tag triggers the publish workflow, which runs the same checks, builds the
+wheel and uploads it to PyPI. If `release` stops partway (a failed check,
+a hook), fix the cause and finish the remaining steps by hand; it will not
+rerun over a dirty tree.
 
 `stubs/svgelements/` holds the type stubs the checkers use for svgelements (its source is ISO-8859-1 encoded and
 unreadable to them); keep the stubs

@@ -23,6 +23,8 @@ from tcnc.toolpath import Hints, Segment, Toolpath, check_traversal, heading_cha
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from tcnc.svg import SvgPath
+
 
 @dataclass(frozen=True, slots=True)
 class Cut:
@@ -123,10 +125,15 @@ class OperationPlan:
 
 @dataclass(frozen=True, slots=True)
 class JobPlan:
-    """Every operation of a job, planned, with the job that produced them."""
+    """Every operation of a job, planned, with the job that produced them.
+
+    ``unselected`` are the drawing's visible paths that no operation
+    selected (empty for a plan built from toolpaths rather than a document).
+    """
 
     job: Job
     operations: tuple[OperationPlan, ...]
+    unselected: tuple[SvgPath, ...] = ()
 
     @property
     def cuts(self) -> tuple[Cut, ...]:

@@ -7,29 +7,43 @@ controller must provide. Keep the outcome in the operator's machine file (below)
 
 ## What tcnc assumes of the controller
 
-- LinuxCNC with X, Y, Z and a rotary **A axis about Z**, configured **unwrapped** (no `WRAPPED_ROTARY`): A values
-  accumulate across closed
+- LinuxCNC with X, Y, Z and a rotary **A axis about Z**, configured
+  **unwrapped** (no `WRAPPED_ROTARY`): A values accumulate across closed
   shapes and can reach several full turns in one program. Do not put
-  soft limits on A that a long program could hit.
-- The oscillating head is switched like a spindle: `M3` (with an optional
-  `S` word) and `M5`, `G97` mode. A creaser and a pen never get `M3`.
+  soft limits on A that a long program could hit. Every program assumes
+  A = 0 at its start and ends by unwinding to `A0` after the last lift;
+  re-home A between sheets all the same.
+- The oscillating head is switched like a spindle, and that is all the
+  program says about it: `M3` (with an optional `S` word) and `M5`, in
+  `G97` mode. Everything else the head needs is derived in HAL. A
+  frequency or stroke selection follows `spindle.0.on` and
+  `spindle.0.speed-out` (the `S` value is then whatever that mapping
+  expects, not a true RPM). A holding current for the blade rotation, a
+  head enable, or anything else that must be live while the tool is in
+  the material must not follow spindle-on: a creaser and a pen never get
+  `M3`, and their A axis still holds an angle under load. Key such
+  signals to the program state instead, so that they stay on through a
+  feed hold or a pause and during MDI test cuts.
 - Tool changes are `T n M6` followed by `G43`. The controller is
-  responsible for the change itself: manual change prompts (`hal_manualtoolchange`) or a changer, `TOOL_CHANGE_POSITION`
-  and
-  `TOOL_CHANGE_QUILL_UP` as wanted. tcnc retracts to safe height before
-  every change and writes no dwell after it; `M6` blocks until the change
-  is confirmed.
+  responsible for the change itself: manual change prompts
+  (`hal_manualtoolchange`) or a changer, `TOOL_CHANGE_POSITION` and
+  `TOOL_CHANGE_QUILL_UP` as wanted. tcnc writes no dwell after the
+  change; `M6` blocks until it is confirmed. Before a change the program
+  either goes to `tool_change_z` in machine coordinates (`G53 G0 Z`, set
+  in the machine file) or, without that setting, writes no retract at all
+  and relies on `TOOL_CHANGE_QUILL_UP`. It never retracts in work
+  coordinates before a change: before the first one it cannot know which
+  tool length compensation is active, and `M2` leaves the last tool's on.
 - **Tool offsets live in the tool table.** `G43` after `M6` applies the
   loaded tool's offsets, so every tool must be touched off so that **Z0
   is the material surface** with its offset active. A tool without a
   number in the machine file is the one already mounted and is never
-  changed to.
-- The header sets `G17 G21 G90 G94 G91.1 G97 G40 G49` and, if asked,
-  `G64 P` or `G61`; the work coordinate system is left as the controller
-  has it. Before the first tool change the program retracts to the first
-  operation's safe height with tool length compensation cancelled: make
-  sure that height clears the material for whatever is mounted, or let
-  `TOOL_CHANGE_QUILL_UP` do the retract.
+  changed to. A program without a tool change never touches the
+  compensation: it runs in the state the controller is in, so load the
+  mounted tool (`T n M6` then `G43` in MDI) before running one.
+- The header sets `G17 G21 G90 G94 G91.1 G97 G40` and, if asked,
+  `G64 P` or `G61`; the work coordinate system and the tool length
+  compensation are left as the controller has them.
 
 ## The machine file
 
@@ -48,6 +62,7 @@ Template, with every value to confirm marked:
 ```toml
 [job]
 z_safe = 10             # confirm: clears the material and the holding fixture
+tool_change_z = 0       # confirm: machine Z (G53) clear of everything for a change; omit to rely on TOOL_CHANGE_QUILL_UP
 xy_feed = 250           # confirm: mm/min for the material
 z_feed = 250            # confirm: plunge feed
 a_feed = 60             # confirm: deg/min for in-place rotations
@@ -89,13 +104,14 @@ may set it (`overcut = 1.0` extends every run by 1 mm at both ends).
 |--------------------------------------|-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
 | `xy_feed`, `z_feed`, `a_feed`        | 250, 250 mm/min, 60 deg/min | Cut test squares at increasing feeds; watch for tearing and for the A axis lagging at corners.                                              |
 | `z_safe`                             | 10 mm                       | Must clear the material, clamps and any bridge; a pen operation may use a smaller `z_safe` of its own.                                      |
+| `tool_change_z`                      | none                        | Machine Z (`G53`) for changes: the position with the head up, clear of the fixture; or unset, with `TOOL_CHANGE_QUILL_UP` retracting.       |
 | `z_depth` per tool                   | -1.5, -0.4, -0.5 mm         | Knife: just through the sheet into the spoilboard; creaser: a clean fold without cracking; pen: a mark without a dent. Set per material.    |
 | `z_step`                             | 0 (one pass)                | Only for thick material; every increment is at most the step.                                                                               |
 | `corner_angle` knife / creaser       | 15° / 10°                   | Cut and crease a polygon with corners from 5° to 45°; the threshold is the smallest turn that shows tearing or scuffing when dragged round. |
 | `overcut`                            | 0                           | Only for hand-made drawings; measure how far a corner is left joined at the top face with 0 and set the extension you want.                 |
 | `blade_offset`                       | 0                           | See "Measuring". Expected to be non-zero for a drag-style knife edge.                                                                       |
 | `a_offset` per tool                  | 0°                          | See "Measuring".                                                                                                                            |
-| `spindle_speed`, `spindle_wait_on`   | 0, 0 s                      | The head's rated oscillation setting and spin-up time if the controller does not wait for at-speed itself.                                  |
+| `spindle_speed`, `spindle_wait_on`   | 0, 0 s                      | The `S` value the head's HAL mapping expects (a frequency step or a rate), and the spin-up time if the controller does not wait itself.     |
 | `tolerance`                          | 0.01 mm                     | The job's resolution; leave unless the artwork is finer than the machine can hold. Must stay at least 1e-8.                                 |
 | `biarc_tolerance`, `biarc_max_depth` | 0.01 mm, 8                  | Curve fit; tighter costs segments. Leave.                                                                                                   |
 | `output_precision`                   | 3                           | Decimals in every word; the controller's resolution. Leave at 3 for a metric machine.                                                       |
@@ -122,7 +138,10 @@ may set it (`overcut = 1.0` extends every run by 1 mm at both ends).
 2. Air-cut `square.ngc` with `z_depth` above the surface (`--z-depth` cannot be positive; raise the material instead or
    run with the head retracted) to watch the A axis follow the edges and the corners lift, rotate and plunge.
 3. `tcnc --job tests/files/box.toml -o box.ngc --preview box.svg`: three operations and two tool changes; confirm the
-   controller prompts or changes at each `M6` and that `G43` puts every tool's Z0 on the surface.
-4. Cut the square for real in scrap and measure the corners (trail) and the line angle (mounting angle); update the
-   machine file.
-5. Run a layout generator package with `--skip mark` first, then with the pen.
+   controller prompts or changes at each `M6` and that `G43` puts every tool's Z0 on the surface. `box.toml` sets no
+   `tool_change_z`, so this run depends on `TOOL_CHANGE_QUILL_UP` for the retract before each change.
+4. Load the knife in LinuxCNC (`T1 M6` then `G43` in MDI), cut the square for real in scrap and measure the corners
+   (trail) and the line angle (mounting angle); update the machine file.
+5. Run a layout generator package with `--skip mark` first, then with the pen. Read the skipped-content lines the
+   run prints on standard error: with `--skip mark` the mark layer is listed as not selected, and anything else listed
+   there (an extra group, hidden content, text) is content the program will not cut.

@@ -24,8 +24,11 @@ Units: the output is millimetres. The root element's physical ``width`` and
 ``height`` are converted to CSS px exactly (96 per inch) before the parser
 sees them, so a page declared in mm, cm, in, pt or pc has the exact size it
 declares and px content keeps its exact px scale. Visibility policy:
-``display:none`` elements (removed by the parser) and ``visibility="hidden"``
-elements are skipped; opacity, clipping and masks are not considered.
+``display:none`` and ``visibility="hidden"`` elements (their descendants
+included) are skipped; opacity, clipping and masks are not considered.
+Everything skipped, hidden content as well as text, images and foreign
+objects, which tcnc cannot cut, is listed in ``SvgDocument.skipped`` so a
+run can say what the drawing contains that the program does not.
 """
 
 import dataclasses
@@ -34,7 +37,7 @@ import math
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from geom2d import Arc, CubicBezier, GeometryError, Line, P
 from svgelements import svgelements as se
@@ -103,6 +106,21 @@ class SvgProblem:
         return _selected(self.source_id, self.groups, self.clones, ids=ids, layers=layers)
 
 
+type SkipReason = Literal["hidden", "unsupported"]
+UNSUPPORTED_TAGS = frozenset({"text", "image", "foreignObject"})
+"""Drawing content tcnc cannot cut; reported as skipped rather than passed over silently."""
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedElement:
+    """A drawing element the loader left out: hidden, or not a shape tcnc can cut (``unsupported``)."""
+
+    tag: str
+    source_id: str | None
+    groups: tuple[str, ...]
+    reason: SkipReason
+
+
 def _selected(
     source_id: str | None,
     groups: Sequence[str],
@@ -124,12 +142,15 @@ class SvgDocument:
     ``problems`` are the elements that could not be converted (a degenerate
     transform, malformed geometry); they only matter when a selection
     includes them, so ``select`` raises for them then and not before.
+    ``skipped`` lists what was left out on purpose: hidden elements and
+    content tcnc cannot cut (text, images, foreign objects).
     """
 
     paths: tuple[SvgPath, ...]
     width: float
     height: float
     problems: tuple[SvgProblem, ...] = ()
+    skipped: tuple[SkippedElement, ...] = ()
 
     def select(self, *, ids: Sequence[str] = (), layers: Sequence[str] = ()) -> tuple[SvgPath, ...]:
         """The paths matching ``ids`` (element ids or clone ids) and ``layers`` (group labels or ids).
@@ -237,10 +258,12 @@ def load_svg(
     frame = _Frame(scale=MM_PER_PX, height_px=height_px, flip_y=flip_y)
     paths: list[SvgPath] = []
     problems: list[SvgProblem] = []
-    for shape, groups, clones in _shapes(svg, (), ()):
-        if shape.values.get("visibility") == "hidden":
-            continue
+    skipped: list[SkippedElement] = []
+    for shape, groups, clones in _shapes(svg, (), (), skipped):
         shape_id = shape.id if isinstance(shape.id, str) else None
+        if _hidden(shape):
+            skipped.append(SkippedElement(_tag(shape), shape_id, groups, "hidden"))
+            continue
         mapping = _Mapping(shape.transform, frame)
         if _singular_values(mapping.matrix)[1] <= 0.0:
             message = f"element {shape_id or '<unnamed>'} has a degenerate transform"
@@ -252,7 +275,13 @@ def load_svg(
             problems.append(SvgProblem(shape_id, groups, clones, str(exc)))
             continue
         paths.extend(dataclasses.replace(path, groups=groups, clones=clones) for path in converted)
-    return SvgDocument(tuple(paths), width=width_px * MM_PER_PX, height=height_px * MM_PER_PX, problems=tuple(problems))
+    return SvgDocument(
+        tuple(paths),
+        width=width_px * MM_PER_PX,
+        height=height_px * MM_PER_PX,
+        problems=tuple(problems),
+        skipped=tuple(skipped),
+    )
 
 
 def _parse(path: Path | str) -> se.SVG:
@@ -279,7 +308,10 @@ def _parse(path: Path | str) -> se.SVG:
         if px is not None:
             root.set(name, repr(px))
     try:
-        svg = se.SVG.parse(io.BytesIO(ET.tostring(root)), reify=False, ppi=PX_PER_INCH, on_error="raise")
+        # Hidden elements are kept so they can be reported; the loader skips them itself.
+        svg = se.SVG.parse(
+            io.BytesIO(ET.tostring(root)), reify=False, ppi=PX_PER_INCH, on_error="raise", parse_display_none=True
+        )
     except (ValueError, TypeError, IndexError, KeyError, OSError) as exc:
         detail = str(exc) or type(exc).__name__
         msg = f"cannot parse SVG file {path}: {detail}"
@@ -307,18 +339,36 @@ def _number(value: object) -> float | None:
 
 
 def _shapes(
-    container: se.Group | se.Use, groups: tuple[str, ...], clones: tuple[str, ...]
+    container: se.Group | se.Use, groups: tuple[str, ...], clones: tuple[str, ...], skipped: list[SkippedElement]
 ) -> Iterator[tuple[se.Shape, tuple[str, ...], tuple[str, ...]]]:
-    """Yield every shape with the labels/ids of the groups above it and the ids of the clones it belongs to."""
+    """Yield every shape with the labels/ids of the groups above it and the ids of the clones it belongs to.
+
+    Content tcnc cannot cut (``UNSUPPORTED_TAGS``) is appended to
+    ``skipped``; titles, metadata and the like are passed over.
+    """
     for child in container:
         if isinstance(child, se.Group):
             names = tuple(name for name in (child.values.get(LABEL_KEY), child.id) if isinstance(name, str))
-            yield from _shapes(child, groups + names, clones)
+            yield from _shapes(child, groups + names, clones, skipped)
         elif isinstance(child, se.Use):
             use_ids = (child.id,) if isinstance(child.id, str) else ()
-            yield from _shapes(child, groups, clones + use_ids)
+            yield from _shapes(child, groups, clones + use_ids, skipped)
         elif isinstance(child, se.Shape):
             yield child, groups, clones
+        elif (tag := _tag(child)) in UNSUPPORTED_TAGS:
+            element_id = child.id if isinstance(child.id, str) else None
+            skipped.append(SkippedElement(tag, element_id, groups, "hidden" if _hidden(child) else "unsupported"))
+
+
+def _tag(element: se.SVGElement) -> str:
+    """The element's tag without its namespace (``path``, ``text``, ...)."""
+    tag = element.values.get("tag")
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else "element"
+
+
+def _hidden(element: se.SVGElement) -> bool:
+    """True for ``display:none`` or ``visibility:hidden``, own or inherited (the parser propagates both)."""
+    return element.values.get("display") == "none" or element.values.get("visibility") == "hidden"
 
 
 def _convert_shape(

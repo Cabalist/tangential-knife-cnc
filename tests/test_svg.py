@@ -202,6 +202,26 @@ def test_visibility_layer_and_id_filters(fixture: Callable[[str], Path]) -> None
     assert none.paths == ()
 
 
+def test_skipped_content_is_reported(fixture: Callable[[str], Path], tmp_path: Path) -> None:
+    doc = load_svg(fixture("layers.svg"))
+    assert [(s.tag, s.source_id, s.groups[0], s.reason) for s in doc.skipped] == [
+        ("path", "invisible-line", "Cuts", "hidden"),
+        ("path", "undisplayed-line", "Cuts", "hidden"),
+        ("path", "guide-line", "Guides", "hidden"),  # hidden through its layer
+    ]
+    path = drawing(
+        tmp_path,
+        '<g id="notes"><text id="title">hello <tspan>there</tspan></text>'
+        '<image id="logo" width="1" height="1" href="data:,"/></g><path id="p" d="M0 0L1 1"/>',
+    )
+    doc = load_svg(path)
+    assert [p.source_id for p in doc.paths] == ["p"]
+    assert [(s.tag, s.source_id, s.groups, s.reason) for s in doc.skipped] == [
+        ("text", "title", ("notes",), "unsupported"),
+        ("image", "logo", ("notes",), "unsupported"),
+    ]
+
+
 def test_clones_are_included_and_selectable(tmp_path: Path) -> None:
     path = drawing(
         tmp_path,

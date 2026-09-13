@@ -58,6 +58,7 @@ JOB_KEYS = {
     "biarc_max_depth": _INT,
     "output_precision": _INT,
     "z_safe": _FLOAT,
+    "tool_change_z": _FLOAT,
     "blend_mode": _STR,
     "blend_tolerance": _FLOAT,
     "gcode_comments": _BOOL,

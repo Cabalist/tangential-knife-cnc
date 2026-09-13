@@ -4,19 +4,27 @@ Machine contract:
 
 - Modes the program relies on are set in the header: XY plane (G17), feed
   in units per minute (G94), incremental arc centres (G91.1), spindle speed
-  in RPM (G97), absolute positioning (G90), no cutter or tool-length
-  compensation. The active work coordinate system is left as the
-  controller has it.
+  in RPM (G97), absolute positioning (G90), no cutter compensation (G40).
+  The active work coordinate system and the tool length compensation are
+  left as the controller has them: a program without a tool change runs
+  in the compensation state it starts in.
 - The A axis is an unwrapped rotary axis: values accumulate across closed
   shapes and every move takes the shortest rotation from the current value.
-  A pen operation parks the A axis once at the pen's mounting angle and
-  writes no other A word.
+  The program assumes A = 0 at its start and ends by unwinding to A0 after
+  the last lift, with the head off, so one sheet leaves the axis where the
+  next one expects it. A pen operation parks the A axis once at the pen's
+  mounting angle and writes no other A word.
 - Tools: a numbered tool is selected with ``T n M6`` followed by ``G43``,
   which applies the loaded tool's offsets from the controller's tool table
-  (LinuxCNC does not apply them on ``M6`` by itself). The program retracts
-  to safe height before every change (for the first change, in the
-  coordinates active at the start) and the oscillation is off; it writes
-  no dwell around the change, the controller blocks until it is confirmed.
+  (LinuxCNC does not apply them on ``M6`` by itself). The oscillation is
+  off at every change. With ``tool_change_z`` set, the program first goes
+  to that height in machine coordinates (``G53 G0 Z``), which no work
+  offset or tool length can shift; without it, no retract is written and
+  the change happens where the tool is (the previous cut's lift, or the
+  start position before the first change), so the controller's
+  ``TOOL_CHANGE_QUILL_UP`` is expected to lift the head. Nothing else is
+  written around the change: no dwell, the controller blocks until it is
+  confirmed.
   ``M6`` may move the axes and ``G43`` changes the compensated coordinates,
   so the writer forgets every cached axis value at a change and positions
   Z, X, Y and A explicitly afterwards. A tool without a number is the one
@@ -66,7 +74,7 @@ FEED_PER_MINUTE = "G94"
 ARC_CENTRE_INCREMENTAL = "G91.1"
 SPINDLE_RPM_MODE = "G97"
 CANCEL_CUTTER_COMP = "G40"
-CANCEL_TOOL_LENGTH_COMP = "G49"
+MACHINE_COORDINATES = "G53"
 BLEND = "G64"
 EXACT_PATH = "G61"
 RAPID = "G0"
@@ -287,6 +295,15 @@ class GCodeWriter:
         """Stop the oscillating head."""
         self._write(SPINDLE_OFF, "oscillation off")
 
+    def machine_z(self, z: float, *, comment: str | None = None) -> None:
+        """Rapid to ``z`` in machine coordinates (``G53 G0 Z``): no work offset or tool length applies.
+
+        The work-coordinate Z is unknown afterwards, so the next Z move
+        writes its word again.
+        """
+        self._write(f"{MACHINE_COORDINATES} {RAPID} Z{self._fmt(z)}", comment)
+        self.state.z = None
+
     def tool_change(self, tool: Tool) -> None:
         """Select ``tool`` (``T n M6``) and apply its offsets from the tool table (``G43``).
 
@@ -327,7 +344,6 @@ class GCodeWriter:
         self.command(ARC_CENTRE_INCREMENTAL, comment="arc centres relative to the start point")
         self.command(SPINDLE_RPM_MODE, comment="spindle speed in RPM")
         self.command(CANCEL_CUTTER_COMP, comment="no cutter compensation")
-        self.command(CANCEL_TOOL_LENGTH_COMP, comment="no tool length compensation")
         if opts.blend_mode == "blend":
             if opts.blend_tolerance > 0.0:
                 self.command(f"{BLEND} P{self._fmt(opts.blend_tolerance)}", comment="blend with tolerance")
@@ -436,7 +452,10 @@ def write_program(plan: JobPlan, *, now: Callable[[], datetime] | None = None) -
 
     Operations follow each other in order; a tool change is written only
     when the tool differs from the one in use, and never for a tool without
-    a number (the one mounted before the program starts).
+    a number (the one mounted before the program starts). Before a change
+    the program goes to ``job.tool_change_z`` in machine coordinates when
+    that is set, and writes no retract otherwise. The program ends raised,
+    with the head off and the A axis unwound to zero.
     """
     job = plan.job
     writer = GCodeWriter(job, now=now)
@@ -450,7 +469,6 @@ def write_program(plan: JobPlan, *, now: Callable[[], datetime] | None = None) -
     writer.header(extras)
     current_a = 0.0
     current_tool: Tool | None = None
-    safe_before = operations[0].settings.z_safe
     for index, operation in enumerate(operations, 1):
         settings = operation.settings
         writer.settings = settings
@@ -458,12 +476,12 @@ def write_program(plan: JobPlan, *, now: Callable[[], datetime] | None = None) -
         if count > 1 or tool.number is not None:
             writer.comment(_operation_label(settings, index, count))
         if (current_tool is None or tool.name != current_tool.name) and tool.number is not None:
-            # Already there after the previous lift; written at the start of the program, whose Z is unknown.
-            writer.rapid(z=safe_before, comment="safe height before the tool change")
+            if job.tool_change_z is not None:
+                writer.machine_z(job.tool_change_z, comment="tool change height, machine coordinates")
             writer.tool_change(tool)
         current_tool = tool
         current_a = _write_operation(writer, operation, current_a)
-        safe_before = settings.z_safe
+    writer.rapid(a=0.0, comment="A axis back to zero for the next program")
     writer.footer()
     return writer.text()
 

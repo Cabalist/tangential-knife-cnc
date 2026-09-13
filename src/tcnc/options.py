@@ -25,7 +25,8 @@ the heights, steps and feeds are validated on their rounded values, passes
 are planned on the grid of representable depths so that no written
 increment exceeds ``z_step``, and the number of passes is bounded
 (``MAX_PASSES``). Tool offsets are the controller's (``G43``); nothing here
-shifts geometry for a tool.
+shifts geometry for a tool. ``Job.tool_change_z`` is the one value in
+machine coordinates.
 """
 
 import dataclasses
@@ -283,7 +284,14 @@ class OperationSettings:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Job:
-    """Job-wide settings, the tools, and the ordered operations."""
+    """Job-wide settings, the tools, and the ordered operations.
+
+    ``tool_change_z`` is a height in *machine* coordinates (``G53``), the
+    one frame no work offset or tool length compensation can shift: when
+    set, the program goes there before every tool change; when ``None``,
+    no retract is written before a change and the controller's own change
+    procedure (``TOOL_CHANGE_QUILL_UP``) is expected to lift the head.
+    """
 
     tools: tuple[Tool, ...]
     operations: tuple[Operation, ...]
@@ -293,6 +301,7 @@ class Job:
     biarc_max_depth: int = 8
     output_precision: int = 3
     z_safe: float = 10.0
+    tool_change_z: float | None = None
     blend_mode: BlendMode = "default"
     blend_tolerance: float = 0.0
     gcode_comments: bool = True

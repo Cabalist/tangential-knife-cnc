@@ -11,6 +11,7 @@
 ;   job: biarc_max_depth = 8
 ;   job: output_precision = 3
 ;   job: z_safe = 10.0
+;   job: tool_change_z = None
 ;   job: blend_mode = default
 ;   job: blend_tolerance = 0.0
 ;   job: gcode_comments = True
@@ -57,45 +58,45 @@ N4 G94  ; feed in mm per minute
 N5 G91.1  ; arc centres relative to the start point
 N6 G97  ; spindle speed in RPM
 N7 G40  ; no cutter compensation
-N8 G49  ; no tool length compensation
-N9 F250.000  ; default feed
+N8 F250.000  ; default feed
 
-N10 M3  ; oscillation on
-N11 G0 Z10.000  ; safe height
+N9 M3  ; oscillation on
+N10 G0 Z10.000  ; safe height
 
 ; Cut 1/4: run from square, 1 segment(s)
-N12 G0 X24.400 Y76.200 A0.000
-N13 G1 Z-1.000  ; plunge
-N14 G1 X25.400
-N15 G1 X76.200
-N16 G1 X77.200
-N17 G0 Z10.000  ; lift
+N11 G0 X24.400 Y76.200 A0.000
+N12 G1 Z-1.000  ; plunge
+N13 G1 X25.400
+N14 G1 X76.200
+N15 G1 X77.200
+N16 G0 Z10.000  ; lift
 
 ; Cut 2/4: run from square, 1 segment(s)
-N18 G0 X76.200 Y77.200 A-90.000
-N19 G1 Z-1.000  ; plunge
-N20 G1 Y76.200
-N21 G1 Y25.400
-N22 G1 Y24.400
-N23 G0 Z10.000  ; lift
+N17 G0 X76.200 Y77.200 A-90.000
+N18 G1 Z-1.000  ; plunge
+N19 G1 Y76.200
+N20 G1 Y25.400
+N21 G1 Y24.400
+N22 G0 Z10.000  ; lift
 
 ; Cut 3/4: run from square, 1 segment(s)
-N24 G0 X77.200 Y25.400 A-180.000
-N25 G1 Z-1.000  ; plunge
-N26 G1 X76.200
-N27 G1 X25.400
-N28 G1 X24.400
-N29 G0 Z10.000  ; lift
+N23 G0 X77.200 Y25.400 A-180.000
+N24 G1 Z-1.000  ; plunge
+N25 G1 X76.200
+N26 G1 X25.400
+N27 G1 X24.400
+N28 G0 Z10.000  ; lift
 
 ; Cut 4/4: run from square, 1 segment(s)
-N30 G0 X25.400 Y24.400 A-270.000
-N31 G1 Z-1.000  ; plunge
-N32 G1 Y25.400
-N33 G1 Y76.200
-N34 G1 Y77.200
-N35 G0 Z10.000  ; lift
+N29 G0 X25.400 Y24.400 A-270.000
+N30 G1 Z-1.000  ; plunge
+N31 G1 Y25.400
+N32 G1 Y76.200
+N33 G1 Y77.200
+N34 G0 Z10.000  ; lift
 
-N36 M5  ; oscillation off
+N35 M5  ; oscillation off
+N36 G0 A0.000  ; A axis back to zero for the next program
 
 N37 M2  ; end of program
 %

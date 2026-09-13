@@ -75,6 +75,21 @@ def test_square_end_to_end(fixture: Callable[[str], Path], tmp_path: Path, capsy
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_skipped_content_is_listed_on_stderr(
+    fixture: Callable[[str], Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([str(fixture("layers.svg")), "-o", str(tmp_path / "layers.ngc"), "--layer", "Cuts"]) == EXIT_OK
+    captured = capsys.readouterr()
+    assert "1 cut," in captured.out
+    assert captured.err.splitlines() == [
+        "tcnc: skipped: layer Marks: 1 path not selected by any operation",
+        "tcnc: skipped: layer Cuts: 2 paths hidden",
+        "tcnc: skipped: layer Guides: 1 path hidden",
+    ]
+    assert main([str(fixture("square.svg")), "-o", str(tmp_path / "square.ngc")]) == EXIT_OK
+    assert capsys.readouterr().err == ""  # nothing in the drawing was left out
+
+
 def test_default_output_name(fixture: Callable[[str], Path], tmp_path: Path) -> None:
     src = tmp_path / "copy.svg"
     src.write_bytes(fixture("circle.svg").read_bytes())

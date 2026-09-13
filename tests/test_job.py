@@ -1,6 +1,7 @@
 """Jobs with several tools: the model, the job file, the program layout and the preview."""
 
 import copy
+import dataclasses
 import math
 import pickle
 import xml.etree.ElementTree as ET
@@ -15,7 +16,7 @@ from tcnc.errors import OptionError, PlanError
 from tcnc.gcode import GCodeWriter, write_program
 from tcnc.jobfile import load_job_file, load_job_files, parse_job
 from tcnc.options import Job, KnifeOptions, Operation, OscillationMode, Tool, ToolKind, pass_schedule
-from tcnc.plan import load_document, plan_job, plan_toolpaths
+from tcnc.plan import SkippedContent, load_document, plan_job, plan_toolpaths, skipped_content
 from tcnc.preview import preview_svg
 from tcnc.toolpath import Toolpath
 from tests.test_corners import circle, square
@@ -219,6 +220,7 @@ def test_job_file_meta_table_is_ignored() -> None:
 MACHINE = """
 [job]
 z_safe = 8
+tool_change_z = -5
 xy_feed = 300
 
 [tools.blade45]
@@ -273,6 +275,7 @@ def test_machine_file_and_operations_file_layer_into_one_job(tmp_path: Path) -> 
     assert loaded.input == tmp_path / "nest" / "sheet.svg"  # relative to the file that named it
     job = loaded.job
     assert job.z_safe == 8.0
+    assert job.tool_change_z == -5.0  # machine coordinates, so a negative value is fine
     assert [tool.name for tool in job.tools] == ["blade45", "wheel", "marker"]
     mark, score, cut = job.settings
     # Operations name tools by kind; the machine file's names differ and are matched by kind.
@@ -414,20 +417,35 @@ def test_program_changes_tools_only_when_the_tool_changes(fixture: Callable[[str
             before = lines[lines.index(change) - 2]
         assert before.startswith("G0 Z"), before
     assert "; Operation 2/3: cut (knife, T1)" in text
-    # The pen parks its A axis once and writes no other A word.
+    # The pen parks its A axis once and writes no other A word until the final unwind.
     pen_start = lines.index("T3 M6")
     a_words = [line for line in lines[pen_start:] if " A" in line or line.startswith("G0 A")]
-    assert len(a_words) == 1
-    (park,) = a_words
+    assert len(a_words) == 2
+    park, unwind = a_words
     assert park.startswith("G0 A")
     assert float(park[4:]) % 360.0 == pytest.approx(45.0)  # the nearest turn onto the pen's mounting angle
+    assert lines[-4:] == ["G0 Z3.000", unwind, "M2", "%"]  # raised, then the A axis back at zero
+    assert unwind == "G0 A0.000"
     # Its lifts go to its own safe height; the creaser and knife lift to the job's.
     assert "G0 Z3.000" in lines[pen_start:]
     assert "G0 Z10.000" in lines[: lines.index("T3 M6")]
     assert "G0 Z3.000" not in lines[: lines.index("T3 M6")]
 
 
-def test_tool_changes_forget_the_cached_axes_and_retract_first() -> None:
+def test_plan_reports_paths_no_operation_selects(fixture: Callable[[str], Path]) -> None:
+    job = three_operations().select(skip=("marks",))
+    document = load_document(fixture("box.svg"), job)
+    plan = plan_job(document, job)
+    marks = [path for path in document.paths if "Marks" in path.groups]
+    assert marks
+    assert plan.unselected == tuple(marks)
+    assert skipped_content(document, plan) == (SkippedContent("Marks", "unselected", "path", len(marks)),)
+    everything = plan_job(document, three_operations())
+    assert everything.unselected == ()
+    assert skipped_content(document, everything) == ()
+
+
+def test_tool_changes_retract_only_in_machine_coordinates_and_forget_the_cached_axes() -> None:
     # Two operations on the same square with different tools: the second must re-position every axis.
     job = Job(
         tools=(CREASER, KNIFE),
@@ -439,10 +457,12 @@ def test_tool_changes_forget_the_cached_axes_and_retract_first() -> None:
     plans = [plan_cuts([square()], settings) for settings in job.settings]
     lines = body(write_program(JobPlan(job, tuple(plans))))
     first_change = lines.index("T2 M6")
-    assert lines[first_change - 1] == "G0 Z10.000"  # retract before the first change, at an unknown start Z
+    # No retract before the first change: the start Z is unknown and so is the compensation active there.
+    assert not lines[first_change - 1].startswith("G0")
     assert lines[first_change + 1] == "G43"
-    assert lines[first_change + 2] == "G0 Z10.000"  # and again in the new tool's coordinates
+    assert lines[first_change + 2] == "G0 Z10.000"  # safe height in the new tool's coordinates
     second_change = lines.index("T1 M6")
+    assert lines[second_change - 1] == "G0 Z10.000"  # the previous cut's lift is where the change happens
     after = lines[second_change + 1 :]
     assert after[0] == "G43"
     assert after[1] == "M3 S800"
@@ -450,12 +470,22 @@ def test_tool_changes_forget_the_cached_axes_and_retract_first() -> None:
     first_rapid = next(line for line in after if line.startswith("G0 X"))
     assert first_rapid.startswith("G0 X0.000 Y0.000 A")  # X, Y and A all written although unchanged on paper
     assert float(first_rapid.split("A")[1]) % 360.0 == pytest.approx(0.0)  # the knife's heading, unwrapped
+    # With a tool change height every change is preceded by a G53 move, which no offset can shift.
+    with_height = dataclasses.replace(job, tool_change_z=-2.5)
+    lines = body(write_program(JobPlan(with_height, tuple(plans))))
+    for change in ("T2 M6", "T1 M6"):
+        assert lines[lines.index(change) - 1] == "G53 G0 Z-2.500"
+    assert lines[lines.index("T2 M6") + 2] == "G0 Z10.000"
     writer = GCodeWriter(job)
     writer.rapid(x=1.0, y=2.0, z=3.0, a=0.0)
     writer.tool_change(KNIFE)
     assert writer.state.x is None and writer.state.z is None  # noqa: PT018 - one fact: nothing is cached
     writer.rapid(x=1.0, y=2.0, z=3.0, a=0.0)
     assert writer.lines[-1] == "G0 X1.000 Y2.000 Z3.000 A0.000"
+    writer.machine_z(0.0)
+    assert writer.lines[-1] == "G53 G0 Z0.000"
+    writer.rapid(z=3.0)  # written again: the work-coordinate Z is unknown after a machine-coordinate move
+    assert writer.lines[-1] == "G0 Z3.000"
 
 
 def test_pen_retracts_before_parking() -> None:

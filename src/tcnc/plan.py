@@ -1,13 +1,14 @@
 """The job pipeline shared by the command line and the library API."""
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from tcnc.corners import JobPlan, OperationPlan, as_settings, plan_cuts
 from tcnc.errors import SvgError
 from tcnc.offset import offset_toolpath
 from tcnc.options import Job, KnifeOptions, OperationSettings, as_job
 from tcnc.ordering import order_toolpaths
-from tcnc.svg import SvgDocument, load_svg
+from tcnc.svg import UNSUPPORTED_TAGS, SvgDocument, load_svg
 from tcnc.toolpath import Toolpath
 
 if TYPE_CHECKING:
@@ -74,7 +75,45 @@ def plan_job(document: SvgDocument, job: Job | KnifeOptions) -> JobPlan:
             msg = f"operation {settings.name!r} selects no cuttable geometry"
             raise SvgError(msg)
         operations.append(plan_operation(toolpaths, settings, resolved))
-    return JobPlan(resolved, tuple(operations))
+    unselected = tuple(
+        path
+        for path in document.paths
+        if not any(path.selected_by(ids=settings.ids, layers=settings.layers) for settings in resolved.settings)
+    )
+    return JobPlan(resolved, tuple(operations), unselected=unselected)
+
+
+type SkipKind = Literal["unselected", "hidden", "unsupported"]
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedContent:
+    """Drawing content that is not in the program: one record per layer, reason and element kind.
+
+    ``layer`` is the outermost group's label (or id), ``None`` outside any
+    group. ``kind`` says why: ``unselected`` (no operation selects it),
+    ``hidden`` (``display:none`` or ``visibility:hidden``) or
+    ``unsupported`` (text, an image, a foreign object). ``tag`` is the
+    element kind, ``path`` for every shape, and ``count`` how many.
+    """
+
+    layer: str | None
+    kind: SkipKind
+    tag: str
+    count: int
+
+
+def skipped_content(document: SvgDocument, plan: JobPlan) -> tuple[SkippedContent, ...]:
+    """What the drawing contains that the plan leaves out: unselected paths first, then hidden and uncuttable content."""
+    counts: dict[tuple[str | None, SkipKind, str], int] = {}
+    for path in plan.unselected:
+        key = (path.groups[0] if path.groups else None, "unselected", "path")
+        counts[key] = counts.get(key, 0) + 1
+    for element in document.skipped:
+        tag = element.tag if element.tag in UNSUPPORTED_TAGS else "path"
+        key = (element.groups[0] if element.groups else None, element.reason, tag)
+        counts[key] = counts.get(key, 0) + 1
+    return tuple(SkippedContent(layer, kind, tag, count) for (layer, kind, tag), count in counts.items())
 
 
 def plan_toolpaths(toolpaths: Sequence[Toolpath], job: Job | KnifeOptions) -> JobPlan:

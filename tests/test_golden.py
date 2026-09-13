@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tcnc.cli import run
-from tcnc.jobfile import load_job_file
+from tcnc.jobfile import load_job_files
 from tcnc.options import KnifeOptions
 
 if TYPE_CHECKING:
@@ -51,15 +51,18 @@ CASES: dict[str, tuple[str, KnifeOptions]] = {
 }
 
 
-# Multi-tool jobs: a job file and the drawing it names.
-JOB_CASES: dict[str, str] = {"box-job": "box.toml"}
+# Multi-tool jobs: the job files to layer; the first names the drawing.
+JOB_CASES: dict[str, tuple[str, ...]] = {
+    "box-job": ("box.toml",),
+    "box-job-change-height": ("box.toml", "tool-change-z.toml"),
+}
 
 
 @pytest.mark.parametrize("name", sorted(CASES) + sorted(JOB_CASES))
 def test_golden(name: str, fixture: Callable[[str], Path], tmp_path: Path) -> None:
     out = tmp_path / f"{name}.ngc"
     if name in JOB_CASES:
-        loaded = load_job_file(fixture(JOB_CASES[name]))
+        loaded = load_job_files([fixture(job_file) for job_file in JOB_CASES[name]])
         assert loaded.input is not None
         run(loaded.job, loaded.input, out, now=lambda: FIXED_NOW)
     else:

@@ -18,6 +18,12 @@ feeds millimetres or degrees per minute, angles **degrees**. Paths in
 Settings that exist at several levels resolve **operation, then tool,
 then job, then the built-in default**.
 
+A run ends by listing on standard error what the drawing contains that
+the program does not: paths in layers no operation selects, hidden
+content, and text or images, one line per layer and reason. A layer the
+job is not meant to cut shows up there every time; a layer it should have
+cut shows up there by mistake.
+
 ## `[job]`
 
 | Key                  | Type                          | Default           | Meaning                                                              |
@@ -31,6 +37,7 @@ then job, then the built-in default**.
 | `biarc_max_depth`    | int                           | `8`               | curve subdivision limit                                              |
 | `output_precision`   | int                           | `3`               | decimals in G-code words (0 to 9)                                    |
 | `z_safe`             | mm                            | `10`              | rapid height above the surface (Z0); the default for every operation |
+| `tool_change_z`      | mm                            | none              | machine-coordinate Z (`G53`) before every tool change; omit: none    |
 | `blend_mode`         | `default` / `blend` / `exact` | `default`         | trajectory mode (`G64` / `G61`)                                      |
 | `blend_tolerance`    | mm                            | `0`               | `G64 P` value                                                        |
 | `gcode_comments`     | bool                          | `true`            | comments in the program                                              |
@@ -167,12 +174,17 @@ trailing the axis, a property of the tool. There is no lead-in setting;
 ## Program layout
 
 The operations follow each other in order. Before a change of tool the
-program is at safe height with the oscillation off; it writes `T n M6`
-and then `G43`, which applies the tool table's offsets (LinuxCNC does not
-apply them on `M6` by itself), retracts to the operation's safe height,
-parks a pen, and cuts. Nothing LinuxCNC does itself (moving to the change
-position, waiting for the change, offsets) is repeated. Each tool is
-assumed to have been touched off so that Z0 is the material surface.
+oscillation is off and, with `tool_change_z` set, the program goes to
+that height in machine coordinates (`G53 G0 Z`), which no work offset or
+tool length can shift; without it no retract is written and the
+controller's `TOOL_CHANGE_QUILL_UP` is expected to lift the head. It then
+writes `T n M6` and `G43`, which applies the tool table's offsets
+(LinuxCNC does not apply them on `M6` by itself), retracts to the
+operation's safe height, parks a pen, and cuts. Nothing LinuxCNC does
+itself (moving to the change position, waiting for the change, offsets)
+is repeated. Each tool is assumed to have been touched off so that Z0 is
+the material surface with its offset active; a program without a tool
+change runs in the compensation state it starts in.
 
 ## Example
 

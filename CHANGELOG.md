@@ -16,11 +16,26 @@ Tool changes (API change; the job file is documented in `docs/job-file.md`):
   default) and the pen (parks the A axis once at its mounting angle,
   never lifts, no overcut, no blade offset, one pass).
 - The program writes `T n M6` then `G43` whenever the tool changes, with
-  the head at safe height and the oscillation off; nothing LinuxCNC does
-  itself (change position, waiting, offsets) is repeated. A tool without
+  the oscillation off; nothing LinuxCNC does itself (change position,
+  waiting, offsets) is repeated. Before a change it goes to the job's
+  `tool_change_z` in machine coordinates (`G53 G0 Z`) when that is set,
+  and writes no retract otherwise: a work-coordinate move before the
+  first change would be shifted by whichever tool length compensation
+  the controller has active. For the same reason the header no longer
+  cancels tool length compensation (`G49`); a program without a tool
+  change runs in the state it starts in. A tool without
   a number is the mounted one and can only lead. Each operation has its
   own safe height. `oscillation_mode` gains `operation` (`program` stays
   as its alias) and defaults per tool kind.
+- A run reports what the drawing contains that the program does not, one
+  line per layer and reason on standard error: paths no operation selects
+  (`JobPlan.unselected`), hidden elements and text, images or foreign
+  objects, which tcnc cannot cut (`SvgDocument.skipped`);
+  `skipped_content(document, plan)` and `RunResult.skipped` carry the
+  records for a wrapper. The loader now keeps `display:none` elements in
+  its walk in order to report them and skips them itself.
+- The program ends raised, with the head off and the A axis unwound to
+  `A0` (`G0 A0` after the last lift), the angle the next program assumes.
 - `tcnc --job JOB.toml` runs a TOML job file (`load_job_file`,
   `parse_job`; reference in `docs/job-file.md`); unknown keys and wrong
   types are usage errors, a `[meta]` table is ignored for producers' own
@@ -44,12 +59,16 @@ Tool changes (API change; the job file is documented in `docs/job-file.md`):
   selection includes them.
 - Review fixes: the writer forgets its cached axis values at a tool
   change (`M6` may move the machine, `G43` changes the coordinates) and
-  positions Z, X, Y and A again; it retracts before the first change and
-  before parking a pen; the job file cannot be an output; abbreviated
+  positions Z, X, Y and A again; it retracts before parking a pen; the
+  job file cannot be an output; abbreviated
   options are refused so none can slip past the `--job` check; legend
   text is XML-escaped.
 - The preview colours operations by tool kind, draws no ticks for a pen
   and adds a legend for multi-operation jobs.
+- `make check` runs the CI checks locally and `make release VERSION=X.Y.Z`
+  sets the version in `pyproject.toml` and `uv.lock`, dates the changelog
+  section, runs the checks, commits, tags `vX.Y.Z` and pushes; the tag
+  triggers the PyPI publish workflow.
 
 Metric only and a job-scoped tolerance (both API changes):
 

@@ -40,7 +40,7 @@ def test_header_and_footer_words() -> None:
     assert any(line.startswith("G21") for line in lines)
     assert any(line.startswith("G90") for line in lines)
     assert any(line.startswith("G40") for line in lines)
-    assert any(line.startswith("G49") for line in lines)
+    assert not any(line.startswith("G49") for line in lines)  # tool length compensation is the controller's
     assert {"G94", "G91.1", "G97"}.issubset(lines)
     assert any(line.startswith("G64 P0.010") for line in lines)
     assert any(line.startswith("F250.000") for line in lines)
@@ -219,6 +219,16 @@ def test_write_program_square_layout() -> None:
     # The first rapid goes to the start of the lead-in (0.05 before the corner), heading up the right edge.
     first_rapid = next(line for line in lines if line.startswith("G0 X"))
     assert first_rapid == "G0 X-0.050 Y0.000 A0.000"
+    # The program ends raised, with the head off and the A axis unwound to zero for the next program.
+    assert lines[-5:] == ["G0 Z10.000", "M5", "G0 A0.000", "M2", "%"]
+
+
+def test_program_writes_no_unwind_when_the_a_axis_ends_at_zero() -> None:
+    along_x = Toolpath.from_geometry([Line(P(0, 0), P(10, 0))])
+    assert along_x is not None
+    lines = body(write_program(plan_toolpaths([along_x], KnifeOptions(overcut=0.0)), now=lambda: FIXED_NOW))
+    assert lines[-3:] == ["M5", "M2", "%"]
+    assert [line for line in lines if " A" in line] == ["G0 X0.000 Y0.000 A0.000"]  # A0 throughout
 
 
 def test_write_program_passes_and_cut_mode() -> None:
@@ -250,7 +260,9 @@ def test_shortest_rotation_across_pi() -> None:
     left_up = Toolpath.from_geometry([Line(P(0, 0), P(-1, 0.05)), Line(P(-1, 0.05), P(-2, 0))])
     assert left_up is not None
     text = write_program(plan_toolpaths([left_up], opts), now=lambda: FIXED_NOW)
-    a_words = [word for line in body(text) for word in line.split() if word.startswith("A")]
+    lines = body(text)
+    assert lines[-3] == "G0 A0.000"  # the final unwind is the one rotation allowed to exceed a half turn
+    a_words = [word for line in lines[:-3] for word in line.split() if word.startswith("A")]
     values = [float(word[1:]) for word in a_words]
     assert values[0] == pytest.approx(177.1376, abs=1e-3)
     assert all(abs(b - a) < 180.0 for a, b in pairwise(values))
