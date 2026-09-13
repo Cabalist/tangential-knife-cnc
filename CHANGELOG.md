@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1 (unreleased)
+## 1.2.0 (2026-09-13)
 
 Tool changes (API change; the job file is documented in `docs/job-file.md`):
 

@@ -1,6 +1,8 @@
 """Golden G-code files: the CLI pipeline end to end, byte for byte.
 
-Regenerate deliberately with ``TCNC_UPDATE_GOLDEN=1 uv run pytest tests/test_golden.py``
+The header names the installed version; these tests pin it to
+``GOLDEN_VERSION`` so a release does not change every golden. Regenerate
+deliberately with ``TCNC_UPDATE_GOLDEN=1 uv run pytest tests/test_golden.py``
 and review the diff before committing.
 """
 
@@ -21,6 +23,14 @@ if TYPE_CHECKING:
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 FIXED_NOW = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+GOLDEN_VERSION = "0.0.0"
+
+
+@pytest.fixture(autouse=True)
+def _pinned_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The writer stamps ``tcnc.gcode.__version__`` into the header; hold it still here."""
+    monkeypatch.setattr("tcnc.gcode.__version__", GOLDEN_VERSION)
+
 
 # The fixture pages are 4 in (101.6 mm) square; the option values below are millimetres.
 CASES: dict[str, tuple[str, KnifeOptions]] = {

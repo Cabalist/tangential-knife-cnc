@@ -374,9 +374,13 @@ exists neither locally nor on `origin`. The version lives in
 `pyproject.toml` alone: `uv.lock` records it (`uv lock` refreshes that)
 and `tcnc.__version__` reads it from the installed metadata. Pushing the
 tag triggers the publish workflow, which runs the same checks, builds the
-wheel and uploads it to PyPI. If `release` stops partway (a failed check,
-a hook), fix the cause and finish the remaining steps by hand; it will not
-rerun over a dirty tree.
+wheel and uploads it to PyPI. If `release` stops after the bump (a failed
+check, a hook), fix the cause and run it again: it finds the version
+already set and goes on to lock, check, commit, tag and push. It insists
+on a clean tree, so with the bump still uncommitted either commit it or
+run `make release-tag VERSION=1.2.3`, which does only the commit, tag and
+push. The goldens pin the version they embed, so a bump does not change
+them.
 
 `stubs/svgelements/` holds the type stubs the checkers use for svgelements (its source is ISO-8859-1 encoded and
 unreadable to them); keep the stubs
