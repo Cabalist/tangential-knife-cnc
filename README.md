@@ -84,8 +84,8 @@ or as a tool: `uv tool install .` (or `pipx install .`).
    the axis (a chord whose heading turns along it is shifted in pieces so
    the edge stays within `--tolerance` of the artwork); corners get a
    small arc about the original vertex so the edge follows the artwork.
-   Each connector remembers the whole turn of the source joint it spans
-   (also after being split into 90° pieces), so a sharp corner is still a
+   Each connector remembers the whole turn of the source joint it spans (also after being split into 90° pieces), so a
+   sharp corner is still a
    lift after compensation.
 5. **Corners.** Wherever the blade heading would change by more than
    `--corner-angle` while cutting, the path is split and the knife lifts,
@@ -118,40 +118,40 @@ different encoding.
 
 All lengths are in millimetres, times in seconds, angles in degrees.
 
-| Group | Option | Default | Meaning |
-|---|---|---|---|
-| I/O | `INPUT` | | SVG file to cut |
-| | `-o`, `--output PATH` | `INPUT.ngc` | G-code file |
-| | `--preview PATH` | | also write an SVG preview of the cut plan |
-| | `--id ID` | | cut only these element ids (repeatable) |
-| | `--layer NAME` | | cut only elements inside this Inkscape layer label or group id (repeatable) |
-| | `--flip-y` / `--no-flip-y` | on | machine origin at the bottom left |
-| | `--gcode-comments` / `--no-gcode-comments` | on | comments in the output |
-| | `--gcode-line-numbers` | off | `N` line numbers |
-| | `--write-settings` | off | list every option in the header |
-| | `--debug` | off | tracebacks on errors |
-| Geometry | `--tolerance` | `0.01` | job resolution (mm), at least `1e-8` |
-| | `--biarc-tolerance` | `0.01` | curve-to-biarc fit tolerance, at least `1e-8` |
-| | `--biarc-max-depth` | `8` | curve subdivision limit (halvings per inflection-free span) |
-| | `--output-precision` | `3` | decimals in G-code words |
-| Machine | `--xy-feed` | `250` | XY feed, mm/min |
-| | `--z-feed` | `250` | plunge feed, mm/min |
-| | `--a-feed` | `60` | A feed, deg/min (used for in-place rotations) |
-| | `--z-safe` | `10` | Z for rapids; must be above the material surface (Z0) |
-| | `--z-depth` | `-1` | final depth, at or below the surface |
-| | `--z-step` | `0` | depth per pass (0 = one pass) |
-| | `--tool-wait` | `0` | dwell after plunge and lift |
-| | `--blend-mode` | `default` | `default` (leave the controller's), `blend` (G64) or `exact` (G61) |
-| | `--blend-tolerance` | `0` | G64 P value |
-| Knife | `--corner-angle` | `15` | lift threshold, degrees |
-| | `--overcut` | `0` | extension at both ends of every run |
-| | `--blade-offset` | `0` | blade trail behind the axis (0 = off) |
-| | `--blade-width` | `0` | blade width, for the preview's heading ticks |
-| | `--a-offset` | `0` | blade mounting angle added to every A |
-| | `--oscillation-mode` | `program` | `program` (alias of `operation`), `cut` or `off` |
-| | `--spindle-speed` | `0` | `S` word for the head (0 = none) |
-| | `--spindle-wait-on` | `0` | dwell after switching the head on |
-| Paths | `--path-sort-method` | `none` | `none` or `nearest` |
+| Group    | Option                                     | Default     | Meaning                                                                     |
+|----------|--------------------------------------------|-------------|-----------------------------------------------------------------------------|
+| I/O      | `INPUT`                                    |             | SVG file to cut                                                             |
+|          | `-o`, `--output PATH`                      | `INPUT.ngc` | G-code file                                                                 |
+|          | `--preview PATH`                           |             | also write an SVG preview of the cut plan                                   |
+|          | `--id ID`                                  |             | cut only these element ids (repeatable)                                     |
+|          | `--layer NAME`                             |             | cut only elements inside this Inkscape layer label or group id (repeatable) |
+|          | `--flip-y` / `--no-flip-y`                 | on          | machine origin at the bottom left                                           |
+|          | `--gcode-comments` / `--no-gcode-comments` | on          | comments in the output                                                      |
+|          | `--gcode-line-numbers`                     | off         | `N` line numbers                                                            |
+|          | `--write-settings`                         | off         | list every option in the header                                             |
+|          | `--debug`                                  | off         | tracebacks on errors                                                        |
+| Geometry | `--tolerance`                              | `0.01`      | job resolution (mm), at least `1e-8`                                        |
+|          | `--biarc-tolerance`                        | `0.01`      | curve-to-biarc fit tolerance, at least `1e-8`                               |
+|          | `--biarc-max-depth`                        | `8`         | curve subdivision limit (halvings per inflection-free span)                 |
+|          | `--output-precision`                       | `3`         | decimals in G-code words                                                    |
+| Machine  | `--xy-feed`                                | `250`       | XY feed, mm/min                                                             |
+|          | `--z-feed`                                 | `250`       | plunge feed, mm/min                                                         |
+|          | `--a-feed`                                 | `60`        | A feed, deg/min (used for in-place rotations)                               |
+|          | `--z-safe`                                 | `10`        | Z for rapids; must be above the material surface (Z0)                       |
+|          | `--z-depth`                                | `-1`        | final depth, at or below the surface                                        |
+|          | `--z-step`                                 | `0`         | depth per pass (0 = one pass)                                               |
+|          | `--tool-wait`                              | `0`         | dwell after plunge and lift                                                 |
+|          | `--blend-mode`                             | `default`   | `default` (leave the controller's), `blend` (G64) or `exact` (G61)          |
+|          | `--blend-tolerance`                        | `0`         | G64 P value                                                                 |
+| Knife    | `--corner-angle`                           | `15`        | lift threshold, degrees                                                     |
+|          | `--overcut`                                | `0`         | extension at both ends of every run                                         |
+|          | `--blade-offset`                           | `0`         | blade trail behind the axis (0 = off)                                       |
+|          | `--blade-width`                            | `0`         | blade width, for the preview's heading ticks                                |
+|          | `--a-offset`                               | `0`         | blade mounting angle added to every A                                       |
+|          | `--oscillation-mode`                       | `program`   | `program` (alias of `operation`), `cut` or `off`                            |
+|          | `--spindle-speed`                          | `0`         | `S` word for the head (0 = none)                                            |
+|          | `--spindle-wait-on`                        | `0`         | dwell after switching the head on                                           |
+| Paths    | `--path-sort-method`                       | `none`      | `none` or `nearest`                                                         |
 
 Exit codes: `0` success, `1` bad option or usage (including an output path
 that collides with the input or the preview, and a job file that cannot be
@@ -235,8 +235,8 @@ takes `flip_y`, `tolerance`, `biarc_tolerance`,
 overrides. Unknown keys are errors; angles are degrees.
 
 The tool kinds: a **knife** oscillates (`M3`/`M5`) by default, follows
-the heading with the A axis and lifts at corners above its threshold
-(15° by default). A **creaser** is tangential too, never oscillates, and
+the heading with the A axis and lifts at corners above its threshold (15° by default). A **creaser** is tangential too,
+never oscillates, and
 lifts at corners above its own threshold (10° by default; a wheel cannot
 pivot in the material). A **pen** parks the A axis once at its mounting
 angle, never lifts at corners, has no overcut, no blade offset and a
@@ -281,8 +281,8 @@ coordinates. The job file itself can never be an output.
   the written sweep would differ) becomes a straight move when its chord
   is within the output resolution of the arc, and an error otherwise. Segments that meet
   within `--tolerance` rather than exactly are joined by the next move;
-  before an arc the writer first feeds to the arc's own start point
-  (nothing is written when the rounded words do not change).
+  before an arc the writer first feeds to the arc's own start point (nothing is written when the rounded words do not
+  change).
 - The A axis is unwrapped, as above. Comments are sanitized so no text from
   the SVG can become a command.
 
@@ -353,8 +353,8 @@ uv run pytest                 # unit, fixture and golden tests
 TCNC_UPDATE_GOLDEN=1 uv run pytest tests/test_golden.py   # regenerate goldens on purpose
 ```
 
-`stubs/svgelements/` holds the type stubs the checkers use for svgelements
-(its source is ISO-8859-1 encoded and unreadable to them); keep the stubs
+`stubs/svgelements/` holds the type stubs the checkers use for svgelements (its source is ISO-8859-1 encoded and
+unreadable to them); keep the stubs
 in step with what `src/tcnc/svg.py` uses. The hooks run `uv run --locked`,
 so they fail rather than resolve or change dependencies. The geometry
 kernel comes from PyPI (`tangential-knife-cnc-geometry`); to work against

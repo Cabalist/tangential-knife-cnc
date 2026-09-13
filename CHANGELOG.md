@@ -2,7 +2,7 @@
 
 ## 1.0.1 (unreleased)
 
-Tool changes (API change; `docs/tool-changes.md`):
+Tool changes (API change; the job file is documented in `docs/job-file.md`):
 
 - A `Job` of `Tool`s and `Operation`s is the settings model: each
   operation cuts one selection with one tool; settings resolve operation,
@@ -82,8 +82,8 @@ Fixes from the fourth audit (2026-09-12), all with behavioural tests:
   enough that the blade edge stays within the tolerance of the artwork;
   smooth chord joints shift onto one point, so no spurious connectors
   appear. An arc with headings other than its tangents is rejected.
-- The simplifier keeps every vertex within the tolerance of the result
-  (a run is dropped only when it fits inside the tolerance around its
+- The simplifier keeps every vertex within the tolerance of the result (a run is dropped only when it fits inside the
+  tolerance around its
   start, and a retracing run is cut where it turns back), rejects source
   pieces that do not connect before it merges anything, and does constant
   work per piece (100,000 collinear edges in about 0.1 s).
