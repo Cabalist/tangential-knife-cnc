@@ -18,7 +18,7 @@ from geom2d import GeometryError
 from tcnc import __version__
 from tcnc.errors import OptionError, OutputError, PlanError, SvgError
 from tcnc.gcode import write_program
-from tcnc.jobfile import load_job_file
+from tcnc.jobfile import load_job_files
 from tcnc.options import Job, KnifeOptions, as_job
 from tcnc.output import publish
 from tcnc.plan import load_document, plan_job
@@ -108,7 +108,29 @@ def build_parser() -> _Parser:
     parser.add_argument("-o", "--output", type=Path, help="G-code file to write (default: INPUT with .ngc)")
     parser.add_argument("--preview", type=Path, metavar="SVG", help="also write a preview of the cut plan")
     parser.add_argument(
-        "--job", type=Path, metavar="TOML", help="job file with tools and operations (excludes the knife options)"
+        "--job",
+        type=Path,
+        metavar="TOML",
+        action="append",
+        dest="jobs",
+        help=(
+            "job file with tools and operations (excludes the knife options); repeatable, later files "
+            "override earlier ones, e.g. the machine's tools then a layout's operations"
+        ),
+    )
+    parser.add_argument(
+        "--only",
+        metavar="NAME",
+        action="append",
+        default=[],
+        help="run only the operation with this name (repeatable)",
+    )
+    parser.add_argument(
+        "--skip",
+        metavar="NAME",
+        action="append",
+        default=[],
+        help="leave out the operation with this name, e.g. mark on a machine without a pen (repeatable)",
     )
     parser.add_argument("--debug", action="store_true", help="show tracebacks on errors")
     parser.add_argument("--version", action="version", version=f"tcnc {__version__}")
@@ -341,18 +363,18 @@ def run(  # noqa: PLR0913 - one parameter per file involved
     output_path: Path,
     preview_path: Path | None = None,
     *,
-    job_path: Path | None = None,
+    job_paths: Sequence[Path] = (),
     now: Callable[[], datetime] | None = None,
 ) -> RunResult:
     """Run ``job`` over ``input_path`` into ``output_path`` (and optionally a preview).
 
     Both files are generated in memory first and then published as one unit
     (see ``tcnc.output``): a failure leaves the previous files as they were.
-    ``job_path`` is the job file the job came from, if any; no output may
-    replace it. ``now`` overrides the clock used for the header's creation
-    date (tests).
+    ``job_paths`` are the job files the job came from, if any; no output
+    may replace one. ``now`` overrides the clock used for the header's
+    creation date (tests).
     """
-    _check_distinct_paths(input_path, output_path, preview_path, job_path)
+    _check_distinct_paths(input_path, output_path, preview_path, job_paths)
     resolved = as_job(job)
     document = load_document(input_path, resolved)
     try:
@@ -374,7 +396,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     namespace = parser.parse_args(arguments)
     try:
         job, input_path, output_path, preview_path = _job_and_files(namespace, arguments)
-        result = run(job, input_path, output_path, preview_path, job_path=namespace.job)
+        if namespace.only or namespace.skip:
+            job = as_job(job).select(only=namespace.only, skip=namespace.skip)
+        result = run(job, input_path, output_path, preview_path, job_paths=namespace.jobs or ())
     except OptionError as exc:
         return _fail(EXIT_USAGE, exc, debug=namespace.debug)
     except SvgError as exc:
@@ -399,7 +423,7 @@ def _job_and_files(
     given_input: Path | None = namespace.input
     given_output: Path | None = namespace.output
     given_preview: Path | None = namespace.preview
-    if namespace.job is None:
+    if not namespace.jobs:
         if given_input is None:
             msg = "an SVG file is required unless --job names one"
             raise OptionError(msg)
@@ -410,10 +434,10 @@ def _job_and_files(
     if clashing:
         msg = f"{', '.join(clashing)} describe the single-knife job and cannot be used with --job"
         raise OptionError(msg)
-    loaded = load_job_file(namespace.job)
+    loaded = load_job_files(namespace.jobs)
     input_path = given_input or loaded.input
     if input_path is None:
-        msg = f"neither the command line nor {namespace.job} names an SVG file"
+        msg = "neither the command line nor the job file names an SVG file"
         raise OptionError(msg)
     output_path = given_output or loaded.output or input_path.with_suffix(".ngc")
     return loaded.job, input_path, output_path, given_preview or loaded.preview
@@ -440,13 +464,13 @@ def _fail(code: int, exc: Exception, *, debug: bool) -> int:
 
 
 def _check_distinct_paths(
-    input_path: Path, output_path: Path, preview_path: Path | None, job_path: Path | None = None
+    input_path: Path, output_path: Path, preview_path: Path | None, job_paths: Sequence[Path] = ()
 ) -> None:
     named = {"input": input_path.resolve(), "output": output_path.resolve()}
     if preview_path is not None:
         named["preview"] = preview_path.resolve()
-    if job_path is not None:
-        named["job file"] = job_path.resolve()
+    for index, job_path in enumerate(job_paths, 1):
+        named[f"job file {index}" if len(job_paths) > 1 else "job file"] = job_path.resolve()
     seen: dict[Path, str] = {}
     for role, resolved in named.items():
         if resolved in seen:

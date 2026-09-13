@@ -22,10 +22,22 @@ Tool changes (API change; `docs/tool-changes.md`):
   own safe height. `oscillation_mode` gains `operation` (`program` stays
   as its alias) and defaults per tool kind.
 - `tcnc --job JOB.toml` runs a TOML job file (`load_job_file`,
-  `parse_job`); unknown keys and wrong types are usage errors; the knife
-  options cannot accompany it. The single-knife command line and its
+  `parse_job`; reference in `docs/job-file.md`); unknown keys and wrong
+  types are usage errors, a `[meta]` table is ignored for producers' own
+  data; the knife options cannot accompany it. The single-knife command line and its
   programs are unchanged except the `--write-settings` header, which now
   lists the job, the tool and the operation.
+- `--job` is repeatable: files layer in order (later `[job]` keys
+  override, tools merge by name and key, operations append), so a machine
+  file and an operations-only layout file combine (`load_job_files`).
+  Tools carry default `z_depth`/`z_step` for their operations, and an
+  operation may name a tool by kind when the job has one of that kind.
+- `svgelements` is pinned to 1.9.6, the version the stubs and the 3.14
+  behaviour are tested against. `docs/machine-deployment.md` collects
+  what the controller must provide, the machine file template, the
+  values to confirm on the machine and how to measure the blade.
+- `--only NAME` / `--skip NAME` (repeatable) and `Job.select` run a
+  subset of a job's operations by name, in job order.
 - The loader keeps each path's groups and clone ids; `SvgDocument.select`
   filters after loading (`load_svg` lost `ids`/`layers`). Elements that
   cannot be converted (a degenerate transform) are reported only when a

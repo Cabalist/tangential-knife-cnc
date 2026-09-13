@@ -188,7 +188,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "svgelements", specifier = ">=1.9" },
+    { name = "svgelements", specifier = "==1.9.6" },
     { name = "tangential-knife-cnc-geometry", specifier = ">=1.0.0" },
 ]
 

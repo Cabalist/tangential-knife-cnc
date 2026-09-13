@@ -43,7 +43,7 @@ def test_every_knife_option_is_listed_for_the_job_file_check() -> None:
         option
         for action in parser._actions
         for option in action.option_strings
-        if action.dest not in ("help", "version", "debug", "output", "preview", "job")
+        if action.dest not in ("help", "version", "debug", "output", "preview", "jobs", "only", "skip")
     }
     assert listed == set(KNIFE_OPTIONS)
 

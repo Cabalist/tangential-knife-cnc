@@ -13,7 +13,7 @@ from tcnc.cli import EXIT_OK, EXIT_SVG, EXIT_USAGE, main, run
 from tcnc.corners import JobPlan, plan_cuts
 from tcnc.errors import OptionError, PlanError
 from tcnc.gcode import GCodeWriter, write_program
-from tcnc.jobfile import load_job_file, parse_job
+from tcnc.jobfile import load_job_file, load_job_files, parse_job
 from tcnc.options import Job, KnifeOptions, Operation, OscillationMode, Tool, ToolKind, pass_schedule
 from tcnc.plan import load_document, plan_job, plan_toolpaths
 from tcnc.preview import preview_svg
@@ -185,7 +185,9 @@ def test_job_file_round_trips_the_fixture(fixture: Callable[[str], Path]) -> Non
         ({"tools": {"k": {"number": 1}}}, "needs a kind"),
         ({"tools": {"k": {"kind": "knife", "number": "one"}}}, "must be an integer"),
         ({"tools": {"k": {"kind": "knife", "a_offset": True}}}, "angle in degrees"),
-        ({"tools": {"k": {"kind": "knife"}}, "operations": [{"tool": "k"}]}, "needs z_depth"),
+        ({"tools": {"k": {"kind": "knife"}}, "operations": [{"tool": "k"}]}, "z_depth is set neither"),
+        ({"tools": {"k": {"kind": "knife"}}, "operations": [{"z_depth": -1}]}, "needs a tool"),
+        ({"operations": [{"tool": "knife", "z_depth": -1}]}, "machine job file"),
         (
             {"tools": {"k": {"kind": "knife"}}, "operations": [{"tool": "k", "z_depth": -1, "layers": "Cut"}]},
             "list of strings",
@@ -201,6 +203,171 @@ def test_job_file_round_trips_the_fixture(fixture: Callable[[str], Path]) -> Non
 def test_job_file_errors_name_the_key(data: dict[str, object], match: str) -> None:
     with pytest.raises(OptionError, match=match):
         parse_job(data)
+
+
+def test_job_file_meta_table_is_ignored() -> None:
+    data: dict[str, object] = {
+        "meta": {"generator": "x", "kerf_mm": 0, "nested": {"anything": [1, 2]}},
+        "tools": {"k": {"kind": "knife"}},
+        "operations": [{"tool": "k", "z_depth": -1}],
+    }
+    assert len(parse_job(data).job.operations) == 1
+    with pytest.raises(OptionError, match=r"\[meta\] must be a table"):
+        parse_job({**data, "meta": "free text"})
+
+
+MACHINE = """
+[job]
+z_safe = 8
+xy_feed = 300
+
+[tools.blade45]
+kind = "knife"
+number = 1
+z_depth = -1.5
+spindle_speed = 900
+
+[tools.wheel]
+kind = "creaser"
+number = 2
+z_depth = -0.4
+
+[tools.marker]
+kind = "pen"
+number = 3
+z_depth = -0.5
+"""
+
+LAYOUT = """
+[meta]
+generator = "example"
+kerf_width_mm = 0
+
+[job]
+input = "sheet.svg"
+
+[[operations]]
+name = "mark"
+tool = "pen"
+layers = ["MARK"]
+
+[[operations]]
+name = "score"
+tool = "creaser"
+layers = ["SCORE"]
+
+[[operations]]
+name = "cut"
+tool = "knife"
+layers = ["CUT"]
+overcut = 0
+sort_method = "none"
+"""
+
+
+def test_machine_file_and_operations_file_layer_into_one_job(tmp_path: Path) -> None:
+    (tmp_path / "machine.toml").write_text(MACHINE)
+    (tmp_path / "nest").mkdir()
+    (tmp_path / "nest" / "layout.toml").write_text(LAYOUT)
+    loaded = load_job_files([tmp_path / "machine.toml", tmp_path / "nest" / "layout.toml"])
+    assert loaded.input == tmp_path / "nest" / "sheet.svg"  # relative to the file that named it
+    job = loaded.job
+    assert job.z_safe == 8.0
+    assert [tool.name for tool in job.tools] == ["blade45", "wheel", "marker"]
+    mark, score, cut = job.settings
+    # Operations name tools by kind; the machine file's names differ and are matched by kind.
+    assert (mark.tool.name, score.tool.name, cut.tool.name) == ("marker", "wheel", "blade45")
+    # Depths come from the tools, the feed from the job, the overcut from the operation.
+    assert (mark.z_depth, score.z_depth, cut.z_depth) == (-0.5, -0.4, -1.5)
+    assert cut.xy_feed == 300.0
+    assert cut.overcut == 0.0
+    assert cut.pass_depths == (-1.5,)
+    # A later file overrides job keys and merges tool keys; operations append in order.
+    (tmp_path / "override.toml").write_text(
+        '[job]\nz_safe = 12\n[tools.blade45]\nz_depth = -2\n[[operations]]\ntool = "knife"\nname = "again"\n'
+    )
+    layered = load_job_files(
+        [tmp_path / "machine.toml", tmp_path / "nest" / "layout.toml", tmp_path / "override.toml"]
+    ).job
+    assert layered.z_safe == 12.0
+    assert layered.tool("blade45").spindle_speed == 900  # untouched key survives the merge
+    assert [settings.name for settings in layered.settings] == ["mark", "score", "cut", "again"]
+    assert layered.settings[3].z_depth == -2.0
+    # The operations file alone is not a job: it has no tools.
+    with pytest.raises(OptionError, match="machine job file"):
+        load_job_files([tmp_path / "nest" / "layout.toml"])
+
+
+def test_tool_kind_matching_is_unambiguous() -> None:
+    two_knives = Job(
+        tools=(Tool(name="a", kind="knife", number=1), Tool(name="b", kind="knife", number=2)),
+        operations=(Operation(tool="a", z_depth=-1.0),),
+    )
+    with pytest.raises(OptionError, match="several tools are of kind"):
+        Job(tools=two_knives.tools, operations=(Operation(tool="knife", z_depth=-1.0),))
+    with pytest.raises(OptionError, match="no tool named"):
+        Job(tools=two_knives.tools, operations=(Operation(tool="laser", z_depth=-1.0),))
+    with pytest.raises(OptionError, match="a pen draws in one pass"):
+        Tool(name="p", kind="pen", z_step=0.5)
+    with pytest.raises(OptionError, match="z_depth must be < 0"):
+        Tool(name="k", kind="knife", z_depth=1.0)
+
+
+def test_cli_layers_job_files(
+    fixture: Callable[[str], Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "machine.toml").write_text(MACHINE)
+    layout = tmp_path / "layout.toml"
+    layout.write_text(
+        LAYOUT.replace('input = "sheet.svg"', f'input = "{fixture("box.svg")}"')
+        .replace("MARK", "Marks")
+        .replace("SCORE", "Crease")
+        .replace("CUT", "Cut")
+    )
+    out = tmp_path / "box.ngc"
+    assert main(["--job", str(tmp_path / "machine.toml"), "--job", str(layout), "-o", str(out)]) == EXIT_OK
+    text = out.read_text()
+    assert "T3 M6" in text and "T2 M6" in text and "T1 M6" in text  # noqa: PT018 - one fact: every tool is changed to
+    assert "M3 S900" in text
+    assert "mark 2 cuts" in capsys.readouterr().out
+    # Neither job file may be an output.
+    assert (
+        main(["--job", str(tmp_path / "machine.toml"), "--job", str(layout), "-o", str(tmp_path / "machine.toml")])
+        == EXIT_USAGE
+    )
+    assert "job file 1" in capsys.readouterr().err
+    assert (tmp_path / "machine.toml").read_text() == MACHINE
+
+
+def test_select_runs_a_subset_of_operations() -> None:
+    job = three_operations()  # crease, cut, marks
+    assert [s.name for s in job.select(skip=("marks",)).settings] == ["crease", "cut"]
+    assert [s.name for s in job.select(only=("cut",)).settings] == ["cut"]
+    assert [s.name for s in job.select(only=("marks", "crease")).settings] == ["crease", "marks"]  # job order kept
+    assert [s.name for s in job.select(only=("cut", "marks"), skip=("marks",)).settings] == ["cut"]
+    with pytest.raises(OptionError, match=r"unknown operation\(s\) draw; the job has crease, cut, marks"):
+        job.select(only=("draw",))
+    with pytest.raises(OptionError, match="no operation is left"):
+        job.select(skip=("crease", "cut", "marks"))
+    # Unnamed operations are addressed by their resolved names.
+    unnamed = Job(
+        tools=(KNIFE,), operations=(Operation(tool="knife", z_depth=-1.0), Operation(tool="knife", z_depth=-2.0))
+    )
+    assert unnamed.select(only=("op 2",)).settings[0].z_depth == -2.0
+
+
+def test_cli_only_and_skip(fixture: Callable[[str], Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    out = tmp_path / "box.ngc"
+    assert main(["--job", str(fixture("box.toml")), "-o", str(out), "--skip", "marks"]) == EXIT_OK
+    text = out.read_text()
+    assert "T3 M6" not in text
+    assert "; Operation 1/2: crease (creaser, T2)" in text
+    assert main(["--job", str(fixture("box.toml")), "-o", str(out), "--only", "cut"]) == EXIT_OK
+    assert "; Cuts: 4" in out.read_text()
+    assert main(["--job", str(fixture("box.toml")), "-o", str(out), "--only", "draw"]) == EXIT_USAGE
+    assert "unknown operation(s) draw" in capsys.readouterr().err
+    # The flat single-knife job has one operation, "cut"; skipping it leaves nothing.
+    assert main([str(fixture("square.svg")), "-o", str(out), "--skip", "cut"]) == EXIT_USAGE
 
 
 def test_job_file_paths_are_relative_to_the_file(tmp_path: Path) -> None:

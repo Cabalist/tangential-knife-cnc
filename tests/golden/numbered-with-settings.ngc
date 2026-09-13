@@ -29,6 +29,8 @@
 ;   tool knife: oscillation = True
 ;   tool knife: spindle_speed = 0
 ;   tool knife: spindle_wait_on = 0.0
+;   tool knife: z_depth = None
+;   tool knife: z_step = None
 ;   tool knife: xy_feed = None
 ;   tool knife: z_feed = None
 ;   tool knife: a_feed = None

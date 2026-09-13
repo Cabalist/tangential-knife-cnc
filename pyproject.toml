@@ -22,7 +22,7 @@ classifiers = [
 # Upstream: utlco/utl-tcnc by Claude Zervas (LGPL-3.0). Rewritten 2026-09.
 dependencies = [
     "tangential-knife-cnc-geometry>=1.0.0",
-    "svgelements>=1.9",
+    "svgelements==1.9.6",  # pinned: its 3.14 behaviour and the stubs in stubs/ are tested against this version
 ]
 
 [dependency-groups]

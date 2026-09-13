@@ -28,13 +28,17 @@ increment exceeds ``z_step``, and the number of passes is bounded
 shifts geometry for a tool.
 """
 
+import dataclasses
 import math
 from dataclasses import dataclass, fields
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from geom2d import const
 
 from tcnc.errors import OptionError
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 type ToolKind = Literal["knife", "creaser", "pen"]
 type BlendMode = Literal["default", "blend", "exact"]
@@ -84,8 +88,11 @@ class Tool:
     ``number`` is the ``T`` number; ``None`` means the tool is mounted
     already and no tool change is written. ``corner_angle`` and
     ``oscillation`` default per kind; the feeds and ``tool_wait`` default
-    to the job's values. The kind rules: a pen has no blade offset and no
-    corner threshold and does not oscillate; a creaser does not oscillate.
+    to the job's values. ``z_depth`` and ``z_step`` are this tool's
+    defaults for its operations (the material's cut and score depths live
+    naturally with the tool). The kind rules: a pen has no blade offset,
+    no corner threshold and no passes, and does not oscillate; a creaser
+    does not oscillate.
     """
 
     name: str
@@ -98,6 +105,8 @@ class Tool:
     oscillation: bool | None = None
     spindle_speed: int = 0
     spindle_wait_on: float = 0.0
+    z_depth: float | None = None
+    z_step: float | None = None
     xy_feed: float | None = None
     z_feed: float | None = None
     a_feed: float | None = None
@@ -127,8 +136,11 @@ class Tool:
             value = getattr(self, name)
             _require(condition=value is None or value > 0.0, message=f"{label}: {name} must be > 0")
         _require(condition=self.tool_wait is None or self.tool_wait >= 0.0, message=f"{label}: tool_wait must be >= 0")
+        _require(condition=self.z_depth is None or self.z_depth < 0.0, message=f"{label}: z_depth must be < 0")
+        _require(condition=self.z_step is None or self.z_step >= 0.0, message=f"{label}: z_step must be >= 0")
         if self.kind == "pen":
             _require(condition=self.blade_offset == 0.0, message=f"{label}: a pen has no blade_offset")
+            _require(condition=not self.z_step, message=f"{label}: a pen draws in one pass; z_step must be 0")
             _require(
                 condition=self.corner_angle is None,
                 message=f"{label}: a pen never lifts at corners; corner_angle does not apply",
@@ -162,18 +174,20 @@ class Tool:
 class Operation:
     """One pass of one tool over one selection of the artwork.
 
-    ``ids`` and ``layers`` select as the command line does; both empty
-    means everything visible. Values left ``None`` resolve through the tool
-    and the job; ``oscillation_mode`` defaults to ``"operation"`` for a tool
-    that oscillates and to ``"off"`` otherwise.
+    ``tool`` names a tool of the job, or a tool kind when the job has
+    exactly one tool of that kind. ``ids`` and ``layers`` select as the
+    command line does; both empty means everything visible. Values left
+    ``None`` resolve through the tool and the job (``z_depth`` must be set
+    on one of the two); ``oscillation_mode`` defaults to ``"operation"``
+    for a tool that oscillates and to ``"off"`` otherwise.
     """
 
     tool: str
-    z_depth: float
+    z_depth: float | None = None
     name: str | None = None
     ids: tuple[str, ...] = ()
     layers: tuple[str, ...] = ()
-    z_step: float = 0.0
+    z_step: float | None = None
     z_safe: float | None = None
     overcut: float = 0.0
     corner_angle: float | None = None
@@ -190,10 +204,13 @@ class Operation:
         _require(condition=bool(self.tool), message=f"{label}: an operation needs a tool")
         _finite(self, label)
         _require(
-            condition=self.z_depth < 0.0,
+            condition=self.z_depth is None or self.z_depth < 0.0,
             message=f"{label}: z_depth is measured down from the material surface at Z=0 and must be < 0",
         )
-        _require(condition=self.z_step >= 0.0, message=f"{label}: z_step must be >= 0 (0 means a single pass)")
+        _require(
+            condition=self.z_step is None or self.z_step >= 0.0,
+            message=f"{label}: z_step must be >= 0 (0 means a single pass)",
+        )
         _require(condition=self.z_safe is None or self.z_safe > 0.0, message=f"{label}: z_safe must clear the surface")
         _require(condition=self.overcut >= 0.0, message=f"{label}: overcut must be >= 0")
         _require(
@@ -329,7 +346,10 @@ class Job:
             self._resolve(operation, index)
 
     def _check_structure(self) -> None:
-        _require(condition=bool(self.tools), message="a job needs at least one tool")
+        _require(
+            condition=bool(self.tools),
+            message="a job needs at least one tool (they usually come from the operator's machine job file)",
+        )
         _require(condition=bool(self.operations), message="a job needs at least one operation")
         names = [tool.name for tool in self.tools]
         _require(condition=len(set(names)) == len(names), message=f"tool names must be unique, got {names!r}")
@@ -340,31 +360,59 @@ class Job:
             condition=len(unnumbered) <= 1,
             message=f"at most one tool may be mounted without a number, got {unnumbered!r}",
         )
-        by_name = {tool.name: tool for tool in self.tools}
-        for operation in self.operations:
-            _require(
-                condition=operation.tool in by_name,
-                message=f"operation {operation.name or '?'!r} names unknown tool {operation.tool!r}",
-            )
+        names = [self.tool(operation.tool).name for operation in self.operations]
         # An unnumbered tool is the one already mounted: it can only be used before any tool change.
-        first = self.operations[0].tool
+        first = names[0]
         changed = False
-        for operation in self.operations:
-            if operation.tool != first:
+        for name in names:
+            if name != first:
                 changed = True
-            if by_name[operation.tool].number is None and (changed or operation.tool != first):
+            if self.tool(name).number is None and (changed or name != first):
                 msg = (
-                    f"tool {operation.tool!r} has no number, so the program cannot change to it; "
+                    f"tool {name!r} has no number, so the program cannot change to it; "
                     "an unnumbered tool can only be used by the leading operations"
                 )
                 raise OptionError(msg)
 
+    def select(self, *, only: Sequence[str] = (), skip: Sequence[str] = ()) -> Job:
+        """The same job with only the operations named in ``only`` (all when empty), minus those in ``skip``.
+
+        Operations are matched by their resolved names (``op N`` for an
+        unnamed one) and keep the job's order.
+
+        Raises:
+            OptionError: For a name the job does not have, or when nothing is left.
+        """
+        names = [operation.name or f"op {index + 1}" for index, operation in enumerate(self.operations)]
+        unknown = [name for name in (*only, *skip) if name not in names]
+        _require(
+            condition=not unknown,
+            message=f"unknown operation(s) {', '.join(unknown)}; the job has {', '.join(names)}",
+        )
+        kept = tuple(
+            operation
+            for name, operation in zip(names, self.operations, strict=True)
+            if (not only or name in only) and name not in skip
+        )
+        _require(condition=bool(kept), message=f"no operation is left to run; the job has {', '.join(names)}")
+        return dataclasses.replace(self, operations=kept)
+
     def tool(self, name: str) -> Tool:
-        """The tool called ``name``."""
+        """The tool called ``name``, or the job's only tool of that kind when no tool has the name.
+
+        Raises:
+            OptionError: When neither matches, or the kind is ambiguous.
+        """
         for tool in self.tools:
             if tool.name == name:
                 return tool
-        msg = f"no tool named {name!r}"
+        of_kind = [tool for tool in self.tools if tool.kind == name]
+        if len(of_kind) == 1:
+            return of_kind[0]
+        if of_kind:
+            msg = f"several tools are of kind {name!r} ({', '.join(t.name for t in of_kind)}); name one of them"
+            raise OptionError(msg)
+        msg = f"no tool named {name!r} (and no tool of that kind)"
         raise OptionError(msg)
 
     @property
@@ -395,13 +443,20 @@ class Job:
             return float(value)
 
         z_safe = self.z_safe if operation.z_safe is None else operation.z_safe
+        z_depth = tool.z_depth if operation.z_depth is None else operation.z_depth
+        _require(
+            condition=z_depth is not None,
+            message=f"{label}: z_depth is set neither on the operation nor on tool {tool.name!r}",
+        )
+        assert z_depth is not None
+        z_step = operation.z_step if operation.z_step is not None else (tool.z_step or 0.0)
         if tool.kind == "pen":
             _require(
                 condition=operation.corner_angle is None,
                 message=f"{label}: a pen never lifts; corner_angle does not apply",
             )
             _require(condition=operation.overcut == 0.0, message=f"{label}: a pen has no overcut")
-            _require(condition=operation.z_step == 0.0, message=f"{label}: a pen draws in one pass; z_step must be 0")
+            _require(condition=z_step == 0.0, message=f"{label}: a pen draws in one pass; z_step must be 0")
             corner_angle = None
         else:
             corner_angle = operation.corner_angle if operation.corner_angle is not None else tool.default_corner_angle
@@ -419,8 +474,8 @@ class Job:
             message=f"{label}: z_safe {z_safe!r} rounds to Z0 at {places} decimals; it must be at least {resolution:g}",
         )
         _require(
-            condition=round(operation.z_depth, places) < 0.0,
-            message=f"{label}: z_depth {operation.z_depth!r} rounds to Z0 at {places} decimals",
+            condition=round(z_depth, places) < 0.0,
+            message=f"{label}: z_depth {z_depth!r} rounds to Z0 at {places} decimals",
         )
         feeds = {field: pick(field) for field in ("xy_feed", "z_feed", "a_feed")}
         for field, value in feeds.items():
@@ -428,14 +483,14 @@ class Job:
                 condition=round(value, places) > 0.0,
                 message=f"{label}: {field} {value!r} rounds to F0 at {places} decimals",
             )
-        depths = pass_schedule(operation.z_depth, operation.z_step, places, label=label)
+        depths = pass_schedule(z_depth, z_step, places, label=label)
         return OperationSettings(
             name=name,
             tool=tool,
             ids=operation.ids,
             layers=operation.layers,
-            z_depth=operation.z_depth,
-            z_step=operation.z_step,
+            z_depth=z_depth,
+            z_step=z_step,
             z_safe=z_safe,
             overcut=operation.overcut,
             corner_angle=corner_angle,

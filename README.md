@@ -18,7 +18,10 @@ creasing wheel and a pen, in one program with `T n M6` tool changes.
 
 - Python 3.14 or newer.
 - A LinuxCNC-compatible controller with X, Y, Z and a rotary A axis about Z.
-  The head is switched with `M3`/`M5` (with an optional `S` word).
+  The head is switched with `M3`/`M5` (with an optional `S` word). What
+  the controller must provide, the operator's machine file, the values to
+  confirm on the machine and how to measure the blade are in
+  `docs/machine-deployment.md`.
 - Dependencies: [`tangential-knife-cnc-geometry`](https://github.com/Cabalist/tangential-knife-cnc-geometry)
   (2D geometry kernel, import name `geom2d`, LGPL) and
   [`svgelements`](https://pypi.org/project/svgelements/) (SVG parsing, MIT).
@@ -167,6 +170,14 @@ still holds the previous content.
 machine's tool table, the operations in cutting order, and optionally the
 files; a positional SVG and `-o`/`--preview` on the command line override
 the files, and the knife options above cannot be combined with `--job`.
+`--job` can be repeated: later files override earlier `[job]` keys, merge
+tools by name and append operations, so an operator's machine file (tools
+with their numbers, depths and feeds) combines with a layout's
+operations-only file (`tcnc --job machine.toml --job layout.toml
+sheet.svg`). An operation may name a tool by kind, and takes `z_depth`
+from its tool when it sets none. `--only NAME` and `--skip NAME`
+(repeatable) run a subset of the operations, so a machine without a pen
+can still cut a job that lists a marking operation.
 
 ```toml
 [job]                        # job-wide settings; every key is optional
@@ -210,7 +221,9 @@ z_safe = 3                   # per-operation safe height
 ```
 
 Settings resolve operation, then tool, then job, then the built-in
-defaults. `[job]` takes `flip_y`, `tolerance`, `biarc_tolerance`,
+defaults; `docs/job-file.md` is the full reference, and a `[meta]` table
+is accepted and ignored so a producer can record its own numbers. `[job]`
+takes `flip_y`, `tolerance`, `biarc_tolerance`,
 `biarc_max_depth`, `output_precision`, `z_safe`, `blend_mode`,
 `blend_tolerance`, `gcode_comments`, `gcode_line_numbers`,
 `write_settings`, the feeds and `tool_wait`, plus `input`, `output` and
