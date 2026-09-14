@@ -404,7 +404,14 @@ uv sync --all-groups
 uv run prek run --all-files   # ruff check + format, ty, pyrefly
 uv run pytest                 # unit, fixture and golden tests
 TCNC_UPDATE_GOLDEN=1 uv run pytest tests/test_golden.py   # regenerate goldens on purpose
+make docs                     # the documentation site, into docs/_build/html
 ```
+
+The [documentation site](https://cabalist.github.io/tangential-knife-cnc/)
+is this README, `docs/job-file.md`, `docs/machine-deployment.md`, the
+changelog and a library reference generated from the docstrings
+(`docs/api.rst`). The docs workflow builds it with warnings as errors and
+deploys it to GitHub Pages on every push to `main`.
 
 Releasing:
 

@@ -35,11 +35,18 @@ dev = [
     "ruff",
     "ty",
 ]
+docs = [
+    "furo",
+    "myst-parser",
+    "sphinx",
+    "sphinx-autobuild",
+]
 
 [project.scripts]
 tcnc = "tcnc.cli:main"
 
 [project.urls]
+Documentation = "https://cabalist.github.io/tangential-knife-cnc/"
 Repository = "https://github.com/Cabalist/tangential-knife-cnc"
 
 [tool.setuptools.packages.find]
@@ -96,7 +103,7 @@ ignore = [
     "E501",    # line too long (handled by formatter)
     "TRY003",
 ]
-per-file-ignores = { "tests/**" = ["PLR2004", "ARG001"], "tests/test_cli.py" = ["SLF001"], "stubs/**" = ["ANN401", "I001"] }
+per-file-ignores = { "tests/**" = ["PLR2004", "ARG001"], "tests/test_cli.py" = ["SLF001"], "stubs/**" = ["ANN401", "I001"], "docs/conf.py" = ["INP001"] }
 
 [tool.ruff.lint.isort]
 known-first-party = ["tcnc"]

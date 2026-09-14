@@ -3,8 +3,9 @@
 # checks, commits, tags vX.Y.Z and pushes (the tag triggers the PyPI publish
 # workflow). A rerun finds the bump already in place and goes on from there;
 # with the bump still uncommitted, `make release-tag VERSION=X.Y.Z` does the
-# commit, tag and push. Set UV=/path/to/uv when the `uv` on PATH is not the
-# one to use.
+# commit, tag and push. `make docs` builds the documentation site into
+# docs/_build/html the way the docs workflow does. Set UV=/path/to/uv when the
+# `uv` on PATH is not the one to use.
 
 UV ?= uv
 REMOTE ?= origin
@@ -14,7 +15,7 @@ TODAY := $(shell date +%Y-%m-%d)
 # X.Y.Z with an optional PEP 440 pre-release (a1, b1, rc1), .postN or .devN suffix.
 VERSION_PATTERN = ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$$
 
-.PHONY: check release release-tag
+.PHONY: check docs release release-tag
 
 check:
 	$(UV) run --locked ruff format --check .
@@ -22,6 +23,10 @@ check:
 	$(UV) run --locked ty check
 	$(UV) run --locked pyrefly check
 	$(UV) run --locked pytest
+
+docs:
+	rm -rf docs/_build docs/generated
+	$(UV) run --locked --group docs sphinx-build -W docs docs/_build/html
 
 release:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=X.Y.Z" >&2; exit 2; }
