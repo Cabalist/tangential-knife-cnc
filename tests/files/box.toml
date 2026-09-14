@@ -43,3 +43,10 @@ tool = "pen"
 layers = ["Marks"]
 z_depth = -0.5
 z_safe = 3
+
+[meta]
+producer = "hand-written test fixture"
+
+[meta.drawing]
+name = "box"
+revision = 1

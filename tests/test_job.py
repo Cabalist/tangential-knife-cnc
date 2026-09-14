@@ -2,6 +2,7 @@
 
 import copy
 import dataclasses
+import hashlib
 import math
 import pickle
 import xml.etree.ElementTree as ET
@@ -206,13 +207,19 @@ def test_job_file_errors_name_the_key(data: dict[str, object], match: str) -> No
         parse_job(data)
 
 
-def test_job_file_meta_table_is_ignored() -> None:
+def test_job_file_meta_is_kept_and_does_not_change_the_job() -> None:
     data: dict[str, object] = {
         "meta": {"generator": "x", "kerf_mm": 0, "nested": {"anything": [1, 2]}},
         "tools": {"k": {"kind": "knife"}},
         "operations": [{"tool": "k", "z_depth": -1}],
     }
-    assert len(parse_job(data).job.operations) == 1
+    loaded = parse_job(data)
+    assert [(entry.key, entry.value) for entry in loaded.meta] == [
+        ("generator", '"x"'),
+        ("kerf_mm", "0"),
+        ("nested.anything", "[1, 2]"),
+    ]
+    assert loaded.job == parse_job({key: value for key, value in data.items() if key != "meta"}).job
     with pytest.raises(OptionError, match=r"\[meta\] must be a table"):
         parse_job({**data, "meta": "free text"})
 
@@ -273,6 +280,11 @@ def test_machine_file_and_operations_file_layer_into_one_job(tmp_path: Path) -> 
     (tmp_path / "nest" / "layout.toml").write_text(LAYOUT)
     loaded = load_job_files([tmp_path / "machine.toml", tmp_path / "nest" / "layout.toml"])
     assert loaded.input == tmp_path / "nest" / "sheet.svg"  # relative to the file that named it
+    assert [(digest.name, digest.sha256) for digest in loaded.files] == [
+        ("machine.toml", hashlib.sha256(MACHINE.encode()).hexdigest()),
+        ("layout.toml", hashlib.sha256(LAYOUT.encode()).hexdigest()),
+    ]
+    assert [(entry.key, entry.value) for entry in loaded.meta] == [("generator", '"example"'), ("kerf_width_mm", "0")]
     job = loaded.job
     assert job.z_safe == 8.0
     assert job.tool_change_z == -5.0  # machine coordinates, so a negative value is fine
@@ -288,10 +300,18 @@ def test_machine_file_and_operations_file_layer_into_one_job(tmp_path: Path) -> 
     # A later file overrides job keys and merges tool keys; operations append in order.
     (tmp_path / "override.toml").write_text(
         '[job]\nz_safe = 12\n[tools.blade45]\nz_depth = -2\n[[operations]]\ntool = "knife"\nname = "again"\n'
+        '[meta]\ngenerator = "override"\n'
     )
-    layered = load_job_files(
+    layered_file = load_job_files(
         [tmp_path / "machine.toml", tmp_path / "nest" / "layout.toml", tmp_path / "override.toml"]
-    ).job
+    )
+    # [meta] layers like [job]: the override keeps the position where the key first appeared.
+    assert [(entry.key, entry.value) for entry in layered_file.meta] == [
+        ("generator", '"override"'),
+        ("kerf_width_mm", "0"),
+    ]
+    assert [digest.name for digest in layered_file.files] == ["machine.toml", "layout.toml", "override.toml"]
+    layered = layered_file.job
     assert layered.z_safe == 12.0
     assert layered.tool("blade45").spindle_speed == 900  # untouched key survives the merge
     assert [settings.name for settings in layered.settings] == ["mark", "score", "cut", "again"]

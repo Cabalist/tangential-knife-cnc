@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.3.0 (unreleased)
+
+- Every program names what produced it, in header lines written even
+  without comments: `source:` with the drawing's file name and the SHA-256
+  of its bytes as read, one `job-file:` line per job file in order (or
+  `job-file: none (command-line options)`), one `meta:` line per `[meta]`
+  entry and `versions:` for tcnc, the geometry kernel, svgelements and
+  Python. The format is documented in the README under "Program header".
+- `[meta]` is no longer dropped: the tables layer like `[job]`, nested
+  tables flatten to dotted keys and values are written in TOML form. A key
+  or value with a control character, or a line longer than the 252 bytes
+  LinuxCNC reads, is a usage error naming the key and the file.
+- `--no-timestamp` and `[job] timestamp = false` leave out the `Created`
+  line, so the same inputs and versions give a byte-identical program;
+  `Created` honours `SOURCE_DATE_EPOCH`.
+- Library: `tcnc.Provenance` and `write_program(plan, provenance=...)`;
+  `JobFile.meta` and `JobFile.files`; `SvgDocument.source`;
+  `run(..., job_file=...)` and `RunResult.provenance`; `Job.timestamp` and
+  `KnifeOptions.timestamp`.
+
 ## 1.2.0 (2026-09-13)
 
 Tool changes (API change; the job file is documented in `docs/job-file.md`):

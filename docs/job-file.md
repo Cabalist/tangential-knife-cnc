@@ -4,7 +4,7 @@
 
 A job file is TOML with up to four tables: `[job]`, `[tools.<name>]`
 (one per tool), `[[operations]]` (an array, in cutting order) and an
-optional `[meta]` that tcnc ignores. `--job` may be given several times:
+optional `[meta]` that tcnc copies into the program header. `--job` may be given several times:
 the files are layered in order (see "Layering"). Unknown keys anywhere else are
 errors, and every value must have the type its key expects: `true`/`false`
 for booleans, integers for counts and tool numbers, numbers for lengths
@@ -43,6 +43,7 @@ cut shows up there by mistake.
 | `gcode_comments`     | bool                          | `true`            | comments in the program                                              |
 | `gcode_line_numbers` | bool                          | `false`           | `N` numbers                                                          |
 | `write_settings`     | bool                          | `false`           | list every setting in the header                                     |
+| `timestamp`          | bool                          | `true`            | the `Created` header line; `false` for byte-identical reruns         |
 | `xy_feed`            | mm/min                        | `250`             | default XY feed for every tool                                       |
 | `z_feed`             | mm/min                        | `250`             | default plunge feed                                                  |
 | `a_feed`             | deg/min                       | `60`              | default A feed for in-place rotations                                |
@@ -152,8 +153,16 @@ is a usage error. In the library, `Job.select(only=..., skip=...)`.
 
 ## `[meta]`
 
-Ignored by tcnc; any keys and nesting. Whoever writes the file can keep
-provenance and numbers that have no tcnc meaning there.
+Any keys and nesting, with no effect on the cut. Whoever writes the file
+keeps provenance and numbers that have no tcnc meaning there, and tcnc
+copies them into the program header as `meta:` lines (README, "Program
+header"). The tables of several files layer like `[job]`: a later file
+overrides a key, and the key keeps the position where it first appeared.
+Nested tables become dotted keys, so `[meta.layout]` with `name = "A"` is
+written `meta: layout.name = "A"`; values are written in TOML form. A key
+or value containing a newline or other control character, or an entry
+whose header line would exceed the 252 bytes LinuxCNC reads, is a usage
+error naming the key and the file.
 
 ## Tool kinds
 
@@ -190,7 +199,7 @@ change runs in the compensation state it starts in.
 
 ```toml
 [meta]
-source = "example"           # anything; tcnc does not read this table
+generator = "example"        # any keys: copied into the program header, no effect on the cut
 
 [job]
 z_safe = 8

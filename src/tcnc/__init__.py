@@ -15,6 +15,7 @@ from tcnc.options import Job, KnifeOptions, Operation, OperationSettings, Tool
 from tcnc.ordering import order_toolpaths
 from tcnc.plan import load_document, plan_job, plan_operation, plan_toolpaths, toolpaths_from_document
 from tcnc.preview import preview_svg, write_preview
+from tcnc.provenance import Provenance
 from tcnc.svg import SvgDocument, SvgPath, load_svg
 from tcnc.toolpath import Hints, Segment, Toolpath
 
@@ -31,6 +32,7 @@ __all__ = [
     "OptionError",
     "OutputError",
     "PlanError",
+    "Provenance",
     "Segment",
     "SvgDocument",
     "SvgError",

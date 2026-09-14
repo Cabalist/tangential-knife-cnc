@@ -6,6 +6,7 @@ preview and debugging options may accompany it.
 """
 
 import argparse
+import dataclasses
 import math
 import sys
 import traceback
@@ -18,11 +19,12 @@ from geom2d import GeometryError
 from tcnc import __version__
 from tcnc.errors import OptionError, OutputError, PlanError, SvgError
 from tcnc.gcode import write_program
-from tcnc.jobfile import load_job_files
+from tcnc.jobfile import JobFile, load_job_files
 from tcnc.options import Job, KnifeOptions, as_job
 from tcnc.output import publish
 from tcnc.plan import SkippedContent, load_document, plan_job, skipped_content
 from tcnc.preview import preview_svg
+from tcnc.provenance import FileDigest, Provenance, runtime_versions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -47,12 +49,25 @@ class _Parser(argparse.ArgumentParser):
 
 @dataclass(frozen=True, slots=True)
 class RunResult:
-    """What a run produced, and what the drawing contains that the program does not (``skipped``)."""
+    """What a run produced, what the drawing contains that the program does not (``skipped``) and what
+    the program says it was made from (``provenance``)."""
 
     output: Path
     preview: Path | None
     plan: JobPlan
     skipped: tuple[SkippedContent, ...] = ()
+    provenance: Provenance | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Invocation:
+    """The job and the files one command line names; ``job_file`` is the loaded job files, if any."""
+
+    job: Job | KnifeOptions
+    input: Path
+    output: Path
+    preview: Path | None
+    job_file: JobFile | None = None
 
 
 # Options that describe the single-knife job; they cannot accompany a job file.
@@ -132,6 +147,15 @@ def build_parser() -> _Parser:
         action="append",
         default=[],
         help="leave out the operation with this name, e.g. mark on a machine without a pen (repeatable)",
+    )
+    parser.add_argument(
+        "--timestamp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "write the Created line into the header (default: on, or the job file's timestamp); "
+            "without it the same inputs give a byte-identical program"
+        ),
     )
     parser.add_argument("--debug", action="store_true", help="show tracebacks on errors")
     parser.add_argument("--version", action="version", version=f"tcnc {__version__}")
@@ -353,6 +377,7 @@ def options_from_namespace(ns: argparse.Namespace) -> KnifeOptions:
         gcode_comments=ns.gcode_comments,
         gcode_line_numbers=ns.gcode_line_numbers,
         write_settings=ns.write_settings,
+        timestamp=True if ns.timestamp is None else ns.timestamp,
         ids=tuple(str(item) for item in ns.ids),
         layers=tuple(str(item) for item in ns.layers),
     )
@@ -365,6 +390,7 @@ def run(  # noqa: PLR0913 - one parameter per file involved
     preview_path: Path | None = None,
     *,
     job_paths: Sequence[Path] = (),
+    job_file: JobFile | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> RunResult:
     """Run ``job`` over ``input_path`` into ``output_path`` (and optionally a preview).
@@ -372,8 +398,10 @@ def run(  # noqa: PLR0913 - one parameter per file involved
     Both files are generated in memory first and then published as one unit
     (see ``tcnc.output``): a failure leaves the previous files as they were.
     ``job_paths`` are the job files the job came from, if any; no output
-    may replace one. ``now`` overrides the clock used for the header's
-    creation date (tests).
+    may replace one. ``job_file`` is those files as loaded: the header
+    names them by the hashes taken as they were parsed and carries their
+    ``[meta]``; without it the header hashes ``job_paths`` as they are now.
+    ``now`` overrides the clock used for the header's creation date (tests).
     """
     _check_distinct_paths(input_path, output_path, preview_path, job_paths)
     resolved = as_job(job)
@@ -383,11 +411,18 @@ def run(  # noqa: PLR0913 - one parameter per file involved
     except SvgError as exc:
         msg = f"{exc} in {input_path}" if len(resolved.operations) > 1 else f"no cuttable geometry in {input_path}"
         raise SvgError(msg) from exc
-    outputs: list[tuple[Path, str]] = [(output_path, write_program(plan, now=now))]
+    provenance = Provenance(
+        source=document.source,
+        job_files=job_file.files if job_file is not None else tuple(FileDigest.read(path) for path in job_paths),
+        from_options=isinstance(job, KnifeOptions),
+        meta=job_file.meta if job_file is not None else (),
+        versions=runtime_versions(),
+    )
+    outputs: list[tuple[Path, str]] = [(output_path, write_program(plan, now=now, provenance=provenance))]
     if preview_path is not None:
         outputs.append((preview_path, preview_svg(plan, page=(document.width, document.height))))
     publish(outputs)
-    return RunResult(output_path, preview_path, plan, skipped_content(document, plan))
+    return RunResult(output_path, preview_path, plan, skipped_content(document, plan), provenance)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -396,10 +431,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     namespace = parser.parse_args(arguments)
     try:
-        job, input_path, output_path, preview_path = _job_and_files(namespace, arguments)
+        invocation = _job_and_files(namespace, arguments)
+        job = invocation.job
         if namespace.only or namespace.skip:
             job = as_job(job).select(only=namespace.only, skip=namespace.skip)
-        result = run(job, input_path, output_path, preview_path, job_paths=namespace.jobs or ())
+        result = run(
+            job,
+            invocation.input,
+            invocation.output,
+            invocation.preview,
+            job_paths=namespace.jobs or (),
+            job_file=invocation.job_file,
+        )
     except OptionError as exc:
         return _fail(EXIT_USAGE, exc, debug=namespace.debug)
     except SvgError as exc:
@@ -415,10 +458,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     return EXIT_OK
 
 
-def _job_and_files(
-    namespace: argparse.Namespace, arguments: Sequence[str]
-) -> tuple[Job | KnifeOptions, Path, Path, Path | None]:
-    """The job and the input, output and preview paths, from the flat options or from a job file.
+def _job_and_files(namespace: argparse.Namespace, arguments: Sequence[str]) -> _Invocation:
+    """The job and the input, output and preview paths, from the flat options or from job files.
+
+    ``--timestamp`` / ``--no-timestamp`` override a job file's ``timestamp``.
 
     Raises:
         OptionError: For a missing input, a knife option combined with
@@ -432,7 +475,7 @@ def _job_and_files(
             msg = "an SVG file is required unless --job names one"
             raise OptionError(msg)
         output = given_output or given_input.with_suffix(".ngc")
-        return options_from_namespace(namespace), given_input, output, given_preview
+        return _Invocation(options_from_namespace(namespace), given_input, output, given_preview)
     given = [token.split("=", 1)[0] for token in arguments if token.startswith("-")]
     clashing = sorted({token for token in given if token in KNIFE_OPTIONS})
     if clashing:
@@ -444,7 +487,8 @@ def _job_and_files(
         msg = "neither the command line nor the job file names an SVG file"
         raise OptionError(msg)
     output_path = given_output or loaded.output or input_path.with_suffix(".ngc")
-    return loaded.job, input_path, output_path, given_preview or loaded.preview
+    job = loaded.job if namespace.timestamp is None else dataclasses.replace(loaded.job, timestamp=namespace.timestamp)
+    return _Invocation(job, input_path, output_path, given_preview or loaded.preview, loaded)
 
 
 def _summary(result: RunResult) -> str:

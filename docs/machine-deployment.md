@@ -57,6 +57,13 @@ tcnc --job machine.toml --job job.toml layouts/layout_a.svg -o layout_a.ngc --pr
 tcnc --job machine.toml --job job.toml layouts/layout_a.svg -o layout_a.ngc --skip mark   # no pen mounted
 ```
 
+Every program's header names the drawing and each job file by SHA-256,
+carries the files' `[meta]` entries and the versions of tcnc, its
+geometry kernel, svgelements and Python (README, "Program header"), so a
+program on the controller can be matched to its inputs. Add
+`--no-timestamp` when a rerun over the same inputs must give a
+byte-identical program.
+
 Template, with every value to confirm marked:
 
 ```toml

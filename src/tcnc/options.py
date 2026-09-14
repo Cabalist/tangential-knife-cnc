@@ -291,6 +291,8 @@ class Job:
     set, the program goes there before every tool change; when ``None``,
     no retract is written before a change and the controller's own change
     procedure (``TOOL_CHANGE_QUILL_UP``) is expected to lift the head.
+    ``timestamp`` writes the ``Created`` line; without it the same inputs
+    and versions give a byte-identical program.
     """
 
     tools: tuple[Tool, ...]
@@ -307,6 +309,7 @@ class Job:
     gcode_comments: bool = True
     gcode_line_numbers: bool = False
     write_settings: bool = False
+    timestamp: bool = True
     xy_feed: float = 250.0
     z_feed: float = 250.0
     a_feed: float = 60.0
@@ -631,6 +634,7 @@ class KnifeOptions:
     gcode_comments: bool = True
     gcode_line_numbers: bool = False
     write_settings: bool = False
+    timestamp: bool = True
 
     # Input selection
     ids: tuple[str, ...] = ()
@@ -684,6 +688,7 @@ class KnifeOptions:
             gcode_comments=self.gcode_comments,
             gcode_line_numbers=self.gcode_line_numbers,
             write_settings=self.write_settings,
+            timestamp=self.timestamp,
             xy_feed=self.xy_feed,
             z_feed=self.z_feed,
             a_feed=self.a_feed,

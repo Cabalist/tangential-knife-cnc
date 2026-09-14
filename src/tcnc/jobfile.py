@@ -19,16 +19,19 @@
 Angles (``a_offset``, ``corner_angle``) are degrees in the file. Unknown
 keys are errors, and every value must have the type its key expects. File
 paths in ``[job]`` are relative to the job file's directory. A ``[meta]``
-table is accepted and ignored: producers may record provenance and their
-own numbers there.
+table has no effect on the cut: producers record provenance and their own
+numbers there, and tcnc copies its entries into the program header
+(``JobFile.meta``, see ``tcnc.provenance``), with ``JobFile.files`` naming
+every job file by the SHA-256 of the bytes that were parsed.
 
 Several files can be layered (``load_job_files``): later ``[job]`` keys
 override earlier ones, tools merge by name and key, operations are
-appended in order. That is how an operator's machine file (tools, feeds,
+appended in order, and ``[meta]`` keys layer like ``[job]`` keys. That is how an operator's machine file (tools, feeds,
 depths) combines with a layout's operations-only file. The full reference
 is ``docs/job-file.md``.
 """
 
+import dataclasses
 import math
 import tomllib
 from dataclasses import dataclass
@@ -37,6 +40,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from tcnc.errors import OptionError
 from tcnc.options import Job, Operation, Tool
+from tcnc.provenance import FileDigest, MetaEntry, meta_entries
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -64,6 +68,7 @@ JOB_KEYS = {
     "gcode_comments": _BOOL,
     "gcode_line_numbers": _BOOL,
     "write_settings": _BOOL,
+    "timestamp": _BOOL,
     "xy_feed": _FLOAT,
     "z_feed": _FLOAT,
     "a_feed": _FLOAT,
@@ -107,12 +112,19 @@ OPERATION_KEYS = {
 
 @dataclass(frozen=True, slots=True)
 class JobFile:
-    """A loaded job file: the job and the files it names (``None`` when it names none)."""
+    """A loaded job file: the job and the files it names (``None`` when it names none).
+
+    ``meta`` is the layered ``[meta]`` table, flattened, in the order its
+    keys first appeared; ``files`` names every job file read, in order, by
+    the SHA-256 of its bytes.
+    """
 
     job: Job
     input: Path | None
     output: Path | None
     preview: Path | None
+    meta: tuple[MetaEntry, ...] = ()
+    files: tuple[FileDigest, ...] = ()
 
 
 def load_job_file(path: Path | str) -> JobFile:
@@ -123,30 +135,46 @@ def load_job_file(path: Path | str) -> JobFile:
 def load_job_files(paths: Sequence[Path | str]) -> JobFile:
     """Read several job files and validate them as one job, layered in order.
 
-    Later files win: their ``[job]`` keys override, their tools merge into
-    earlier tools of the same name key by key, and their operations are
-    appended. Paths in each file's ``[job]`` are relative to that file.
+    Later files win: their ``[job]`` and ``[meta]`` keys override, their
+    tools merge into earlier tools of the same name key by key, and their
+    operations are appended. Paths in each file's ``[job]`` are relative to
+    that file.
 
     Raises:
         OptionError: For a missing or malformed file, an unknown key, a
-            value of the wrong type, or any rule the job itself enforces.
+            value of the wrong type, a ``[meta]`` entry that cannot be
+            written into the header, or any rule the job itself enforces.
     """
     merged: dict[str, object] = {}
+    meta: dict[str, MetaEntry] = {}
+    files: list[FileDigest] = []
     for path in paths:
         source = Path(path)
-        _layer(merged, _read(source), source)
-    return parse_job(merged)
+        data = _read_bytes(source)
+        files.append(FileDigest.of(source, data))
+        tables = _parse_toml(source, data)
+        _layer(merged, tables, source)
+        for entry in meta_entries(
+            _table(tables.get("meta", {}), where=f"[meta] in {source}"), where=f"job file {source}"
+        ):
+            meta[entry.key] = entry  # a later file overrides; the key keeps its first position
+    return dataclasses.replace(parse_job(merged), meta=tuple(meta.values()), files=tuple(files))
 
 
-def _read(source: Path) -> dict[str, object]:
+def _read_bytes(source: Path) -> bytes:
     try:
-        return tomllib.loads(source.read_text(encoding="utf-8"))
+        return source.read_bytes()
     except FileNotFoundError as exc:
         msg = f"job file not found: {source}"
         raise OptionError(msg) from exc
     except OSError as exc:
         msg = f"cannot read job file {source}: {exc}"
         raise OptionError(msg) from exc
+
+
+def _parse_toml(source: Path, data: bytes) -> dict[str, object]:
+    try:
+        return tomllib.loads(data.decode("utf-8"))
     except tomllib.TOMLDecodeError as exc:
         msg = f"job file {source} is not valid TOML: {exc}"
         raise OptionError(msg) from exc
@@ -156,9 +184,11 @@ def _read(source: Path) -> dict[str, object]:
 
 
 def _layer(merged: dict[str, object], data: dict[str, object], source: Path) -> None:
-    """Merge one file's tables into ``merged``; file paths are resolved against the file first."""
+    """Merge one file's tables into ``merged``; file paths are resolved against the file first.
+
+    ``[meta]`` is layered separately by ``load_job_files``.
+    """
     _known(data, {"job", "tools", "operations", "meta"}, where=f"job file {source}")
-    _table(data.get("meta", {}), where=f"[meta] in {source}")
     job_table = dict(_table(data.get("job", {}), where=f"[job] in {source}"))
     for key in FILE_KEYS:
         if isinstance(job_table.get(key), str):
@@ -179,7 +209,7 @@ def _layer(merged: dict[str, object], data: dict[str, object], source: Path) -> 
 def parse_job(data: dict[str, object], *, base: Path | None = None) -> JobFile:
     """Build a job from the parsed TOML tables; ``base`` resolves the file paths in ``[job]``."""
     _known(data, {"job", "tools", "operations", "meta"}, where="the job file")
-    _table(data.get("meta", {}), where="[meta]")
+    meta = meta_entries(_table(data.get("meta", {}), where="[meta]"), where="the job file")
     job_table = _table(data.get("job", {}), where="[job]")
     _known(job_table, set(JOB_KEYS) | set(FILE_KEYS), where="[job]")
     files = {key: _convert(job_table[key], FILE_KEYS[key], f"job.{key}") for key in FILE_KEYS if key in job_table}
@@ -205,6 +235,7 @@ def parse_job(data: dict[str, object], *, base: Path | None = None) -> JobFile:
         input=root / str(files["input"]) if "input" in files else None,
         output=root / str(files["output"]) if "output" in files else None,
         preview=root / str(files["preview"]) if "preview" in files else None,
+        meta=meta,
     )
 
 

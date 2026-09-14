@@ -29,6 +29,9 @@ included) are skipped; opacity, clipping and masks are not considered.
 Everything skipped, hidden content as well as text, images and foreign
 objects, which tcnc cannot cut, is listed in ``SvgDocument.skipped`` so a
 run can say what the drawing contains that the program does not.
+
+The file is read once; ``SvgDocument.source`` carries the SHA-256 of those
+bytes exactly as they are on disk, before the root size is normalised.
 """
 
 import dataclasses
@@ -37,16 +40,17 @@ import math
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from geom2d import Arc, CubicBezier, GeometryError, Line, P
 from svgelements import svgelements as se
 
 from tcnc.errors import SvgError
+from tcnc.provenance import FileDigest
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
-    from pathlib import Path
 
     from tcnc.toolpath import SourceGeometry
 
@@ -143,7 +147,9 @@ class SvgDocument:
     transform, malformed geometry); they only matter when a selection
     includes them, so ``select`` raises for them then and not before.
     ``skipped`` lists what was left out on purpose: hidden elements and
-    content tcnc cannot cut (text, images, foreign objects).
+    content tcnc cannot cut (text, images, foreign objects). ``source`` is
+    the file's name and the SHA-256 of its bytes (``None`` for a document
+    not loaded from a file).
     """
 
     paths: tuple[SvgPath, ...]
@@ -151,6 +157,7 @@ class SvgDocument:
     height: float
     problems: tuple[SvgProblem, ...] = ()
     skipped: tuple[SkippedElement, ...] = ()
+    source: FileDigest | None = None
 
     def select(self, *, ids: Sequence[str] = (), layers: Sequence[str] = ()) -> tuple[SvgPath, ...]:
         """The paths matching ``ids`` (element ids or clone ids) and ``layers`` (group labels or ids).
@@ -250,7 +257,8 @@ def load_svg(
     need be repaired to, its endpoints. ``curve_tolerance`` (mm) bounds the
     sampled error of converting elliptical or sheared arcs to cubics.
     """
-    svg = _parse(path)
+    data = _read_bytes(path)
+    svg = _parse(path, data)
     width_px, height_px = _number(svg.width), _number(svg.height)
     if width_px is None or height_px is None or width_px <= 0.0 or height_px <= 0.0:
         msg = f"SVG file {path} has no usable width/height (both attributes are required on the root element)"
@@ -281,21 +289,27 @@ def load_svg(
         height=height_px * MM_PER_PX,
         problems=tuple(problems),
         skipped=tuple(skipped),
+        source=FileDigest.of(Path(path), data),
     )
 
 
-def _parse(path: Path | str) -> se.SVG:
-    """Parse ``path`` with the root's physical size normalised to exact px first."""
+def _read_bytes(path: Path | str) -> bytes:
     try:
-        root = ET.parse(path).getroot()
+        return Path(path).read_bytes()
     except FileNotFoundError as exc:
         msg = f"SVG file not found: {path}"
         raise SvgError(msg) from exc
-    except ET.ParseError as exc:
-        msg = f"{path} is not well-formed XML: {exc}"
-        raise SvgError(msg) from exc
     except OSError as exc:
         msg = f"cannot read SVG file {path}: {exc}"
+        raise SvgError(msg) from exc
+
+
+def _parse(path: Path | str, data: bytes) -> se.SVG:
+    """Parse ``data``, read from ``path``, with the root's physical size normalised to exact px first."""
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        msg = f"{path} is not well-formed XML: {exc}"
         raise SvgError(msg) from exc
     if root.tag not in ("svg", f"{{{SVG_NS}}}svg"):
         msg = f"{path} does not contain an <svg> root element"
