@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tangential-knife-cnc"
-version = "1.2.0"
+version = "1.3.0"
 description = "SVG to LinuxCNC G-code for an oscillating tangential knife"
 readme = "README.md"
 requires-python = ">=3.14"

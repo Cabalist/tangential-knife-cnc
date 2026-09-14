@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.0 (unreleased)
+## 1.3.0 (2026-09-13)
 
 - Every program names what produced it, in header lines written even
   without comments: `source:` with the drawing's file name and the SHA-256
